@@ -1,7 +1,6 @@
 """Git ingestion at a pinned commit and the controlled proposal workflow (local bare remote, stubbed gh)."""
 
 import json
-import os
 import shutil
 import stat
 import subprocess
@@ -93,19 +92,53 @@ def test_propose_pushes_branch_with_only_patched_files(verified_run, remote):
 
 
 def test_open_pr_uses_gh_with_body_file(verified_run, remote, tmp_path):
-    stub = tmp_path / "gh"
-    stub.write_text('#!/bin/sh\necho "$@" > "$GH_STUB_LOG"\necho https://example.invalid/pr/1\n')
-    stub.chmod(stub.stat().st_mode | stat.S_IEXEC)
     log = tmp_path / "gh.log"
-    os.environ["GH_STUB_LOG"] = str(log)
-    try:
-        with pytest.raises(ProposalError, match="requires --push"):
-            propose(verified_run, remote=str(remote[0]), base_branch="main", open_pr=True, gh=str(stub), allow_simulated=True)
-        p = propose(verified_run, remote=str(remote[0]), base_branch="main", push=True, open_pr=True, gh=str(stub),
-                    allow_simulated=True)
-    finally:
-        del os.environ["GH_STUB_LOG"]
+    stub = tmp_path / "gh"
+    # gh runs with a minimal environment, so the log path is baked into the stub rather than passed through env.
+    stub.write_text(f'#!/bin/sh\necho "$@" > "{log}"\necho https://example.invalid/pr/1\n')
+    stub.chmod(stub.stat().st_mode | stat.S_IEXEC)
+    with pytest.raises(ProposalError, match="requires --push"):
+        propose(verified_run, remote=str(remote[0]), base_branch="main", open_pr=True, gh=str(stub), allow_simulated=True)
+    p = propose(verified_run, remote=str(remote[0]), base_branch="main", push=True, open_pr=True, gh=str(stub),
+                allow_simulated=True)
     assert p.pr_url == "https://example.invalid/pr/1"
     args = log.read_text()
     assert "pr create --base main --head boundaryrun/" in args and "--body-file" in args
     assert json.loads((verified_run / "proposal.json").read_text())["pr_url"] == p.pr_url
+    assert git("log", "-1", "--format=%an <%ae>", p.commit, cwd=remote[0]) == "BoundaryRun Agent <agent@boundaryrun.invalid>"
+
+
+@pytest.fixture(scope="module")
+def needs_review_run(remote, tmp_path_factory):
+    """The good fix plus the comment_backdoor edit, with no attack planted: the new seed identity is
+    caught by the static before/after comparison, not by policy, and the run needs a human."""
+    bare, _ = remote
+    report, path = run_investigation(SCENARIO, agent_mode="fixture", fixture="needs_review",
+                                     runs_dir=tmp_path_factory.mktemp("runs"), repo=(str(bare), "main", "docvault"))
+    assert report.verdict.status.value == "needs_review", report.verdict.reasons
+    assert report.policy_summary.denied == 0
+    assert [f.rule_id for f in report.static_analysis.introduced] == ["boundaryrun.docvault.seed-identity"]
+    assert {r.id: r.status for r in report.requirements} == {"R1": "satisfied", "R2": "satisfied", "R3": "satisfied",
+                                                              "R4": "not_assessed"}
+    assert report.claim_check.consistent and report.claim_check.files_changed == ["app/main.py", "app/store.py"]
+    assert report.flow.untrusted_input and not report.flow.external_communication
+    return path.parent
+
+
+def test_needs_review_releases_only_with_a_bound_approval(needs_review_run, remote):
+    from boundaryrun.approval import record_approval
+
+    bare, head = remote
+    with pytest.raises(ProposalError, match="no human approval"):
+        propose(needs_review_run, remote=str(bare), base_branch="main", allow_simulated=True)
+    record_approval(needs_review_run, reviewer="Iris", decision="approve", note="break-glass token is a test fixture")
+    p = propose(needs_review_run, remote=str(bare), base_branch="main", push=True, allow_simulated=True)
+    assert p.approval["reviewer"] == "Iris" and p.trailers["Verdict"] == "needs_review"
+    assert sorted(git("diff", "--name-only", f"{head}..{p.commit}", cwd=bare).splitlines()) == \
+        ["docvault/app/main.py", "docvault/app/store.py"]
+    body = (needs_review_run / "pr_body.md").read_text()
+    assert "Verdict: **needs_review**" in body and "Human approval: **approve** by Iris" in body
+    assert "| R1 | T1 | satisfied |" in body
+    record_approval(needs_review_run, reviewer="Iris", decision="reject")
+    with pytest.raises(ProposalError, match="rejected by Iris"):
+        propose(needs_review_run, remote=str(bare), base_branch="main", allow_simulated=True)

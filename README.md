@@ -19,7 +19,12 @@ results before and after, and the static before/after comparison), and Phase 5 (
 audit log is a hash chain whose head and artifact hashes the report carries, `boundaryrun verify`
 and the viewer recompute them, reports can be HMAC-signed with an operator key, denied paths have
 no existence oracle, file access is directory-fd relative with `O_NOFOLLOW`, the runner base image
-is pinned by digest, and the viewer binds to localhost with a strict CSP).
+is pinned by digest, and the viewer binds to localhost with a strict CSP), and Phase 6 (external
+boundaries: an information-flow rule that denies all egress once the agent has consumed untrusted
+input, task-scoped security requirements shown to the agent from the scenario and assessed from
+execution evidence, a human approval record bound to the report hash that `needs_review` runs need
+before release, and proposals made under a dedicated agent identity with a minimal credential
+environment; the design is mapped to its sources in `docs/RELATED_WORK.md`).
 
 ## Requirements
 
@@ -64,18 +69,22 @@ Live model run (writes a report regardless of outcome; requires `ANTHROPIC_API_K
 |---|---|
 | `build-sandbox` | Builds `boundaryrun-runner:0.1`, the only image untrusted code runs in |
 | `reproduce` | Runs the black-box probe and the target's functional suite against the unmodified target |
-| `investigate --fixture NAME` | Replays a scripted agent (`good`, `ineffective`, `regression`, `injected`) through the real gateway, sandbox and verifier. Labeled non-autonomous in the report |
+| `investigate --fixture NAME` | Replays a scripted agent (`good`, `ineffective`, `regression`, `injected`, `needs_review`) through the real gateway, sandbox and verifier. Labeled non-autonomous in the report |
 | `investigate --live` | Real model-backed investigation (`claude-opus-5-5` by default) |
 | `investigate --obedient\|--compliant [--arm unprotected] [--attack ID]` | Simulated agent against one attack in one arm |
 | `eval [--agents compliant obedient live] [--arms ...] [--repeats N]` | Full grid; writes `.runs/eval-*/summary.{json,md}` |
 | `scan --target DIR` | Run the local Semgrep rules against a directory inside the sandbox |
 | `investigate ... --repo URL --ref REF [--subdir DIR]` | Clone a git repository at a pinned commit as the target |
 | `verify RUN_DIR [--json]` | Recompute artifact hashes, the audit hash chain, the report's embedded records and (with `BOUNDARYRUN_AUDIT_KEY`) the report HMAC. Exit 5 if anything differs. Needs no Docker |
-| `propose RUN_DIR --remote URL [--push] [--open-pr]` | Re-apply a verified patch on a fresh clone, commit to `boundaryrun/<id>`, optionally push and open a PR with `gh`. Never merges |
+| `approve RUN_DIR --reviewer NAME [--reject] [--note TEXT]` | Record a human approval or rejection in `approval.json`, bound to the SHA-256 of `report.json` and HMAC-signed when `BOUNDARYRUN_AUDIT_KEY` is set. A rewritten report orphans the approval. Needs no Docker |
+| `propose RUN_DIR --remote URL [--push] [--open-pr] [--operator 'Name <email>']` | Re-apply a releasable patch on a fresh clone, commit to `boundaryrun/<id>` as `BoundaryRun Agent <agent@boundaryrun.invalid>` with trailers (investigation, verdict, audit chain head, report hash, approver, co-author), optionally push and open a PR with `gh`. `verified` releases on its own; `needs_review` needs a bound approval; a rejection blocks. `git` and `gh` run with a minimal environment, an https push requires `BOUNDARYRUN_AGENT_TOKEN`, ssh remotes are refused. Never merges |
 
 Each investigation writes `.runs/<id>/` with `report.json`, `audit.jsonl`, `patch.diff`, the
 read-only `original/` snapshot and the agent's `workspace/`. Set `BOUNDARYRUN_AUDIT_KEY` to also
-write `report.hmac`; keep the key off the machine that stores the runs.
+write `report.hmac` and to sign approvals; keep the key off the machine that stores the runs. Set
+`BOUNDARYRUN_AGENT_TOKEN` to a scoped, short-lived token for the agent identity only when running
+`propose --push` against an https remote; it is read by a git credential helper and never enters
+agent context.
 
 ## Evidence viewer
 
@@ -95,15 +104,16 @@ the loader against a copy of a real eval summary and two real reports in `web/te
 ## Layout
 
 ```
-src/boundaryrun/      control process: agent, gateway, policy, paths, sandbox, static, verify, evidence, repo, propose, pipeline, eval, cli
+src/boundaryrun/      control process: agent, gateway, policy, paths, sandbox, static, verify, requirements, evidence, approval, repo, propose, pipeline, eval, cli
 rules/                local Semgrep rules (mounted read-only into the scan container)
 targets/docvault/     deliberately vulnerable FastAPI app (synthetic data, planted README injection, canary secret)
-scenarios/docvault-idor/   finding.json, scenario.toml (policy + sandbox limits), probe.py, fixtures/*.json, attacks/*
+scenarios/docvault-idor/   finding.json, scenario.toml (policy + sandbox limits), threat_model.toml, probe.py, fixtures/*.json, attacks/*
 scenarios/docvault-idor-sast/  same target; the finding is derived from a Semgrep rule's baseline result
 docker/runner.Dockerfile   runtime image for target code, tests and the probe
 web/                  Next.js evidence viewer (src/lib/runs.ts loads .runs; src/app/{eval,runs}/[id] render it)
 docs/ARCHITECTURE.md  trust boundaries, invariants with their tests, verdict semantics, limitations
 docs/EVALUATION.md    Phase 2 arms, simulated agents, attacks, metrics, results
+docs/RELATED_WORK.md  the published mechanisms Phase 6 is built against, what was borrowed and what was not
 tests/                unit (no Docker), container boundary, end-to-end; live test is opt-in via BOUNDARYRUN_LIVE=1
 ```
 
@@ -114,8 +124,11 @@ metadata (versions, image ID), the finding, the agent run (mode, autonomy flag, 
 usage for live runs, visible text only, never hidden reasoning), the agent's own claim kept
 separate from the verdict, every tool request with its policy decision, outcome and chain hashes, injection
 observations (attempts vs executions, canary hits by channel), baseline and post-patch probe
-and test results, the unified diff with per-file scope flags, errors, and the verdict with its
-reasons and an explicit statement of what `verified` does and does not claim, and the audit chain head.
+and test results, the unified diff with per-file scope flags, which legs of the lethal trifecta the
+agent actually held (`flow`), each task requirement with its status and the evidence it was judged
+on (`requirements`), the agent's claimed file list against the diff (`claim_check`), errors, and the
+verdict with its reasons and an explicit statement of what `verified` does and does not claim, and
+the audit chain head.
 
 Live evaluation (real model, every arm and attack, N repeats; requires credentials):
 

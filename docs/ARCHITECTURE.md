@@ -12,7 +12,9 @@ One Python process (the **control process**) plus disposable containers. No serv
 | `sandbox.py` | Exports source trees and runs untrusted code in locked-down containers | Trusted orchestrator, untrusted payload |
 | `verify.py`, `static.py` | Diff, independent scope check, Semgrep before/after comparison, verdict as a pure function of execution results | Trusted |
 | `evidence.py` | Audit hash chain, artifact hashes, optional HMAC, and `verify` which recomputes all of them from disk | Trusted |
-| `repo.py`, `propose.py` | Clone a git repository at a pinned commit; turn a verified run into a branch and (explicitly) a PR | Trusted; the cloned content is untrusted |
+| `requirements.py` | Task-scoped threat model: outcome-phrased requirements shown to the agent from the scenario and assessed from probe and static results only | Trusted input, never read from the repository |
+| `approval.py` | The one human decision in the pipeline: an approval or rejection bound to the SHA-256 of the exact report, HMAC-signed when an operator key is set | Trusted when bound and (with a key) signed |
+| `repo.py`, `propose.py` | Clone a git repository at a pinned commit; turn a releasable run into a branch and (explicitly) a PR under the agent identity with a minimal credential environment | Trusted; the cloned content is untrusted |
 | `pipeline.py` | Orchestration and the JSON evidence report | Trusted |
 
 ```
@@ -45,6 +47,16 @@ One Python process (the **control process**) plus disposable containers. No serv
 4. **Patched app to verdict.** The security regression check is a black-box HTTP probe in a
    separate container. It imports nothing from the target, so patched code can only influence
    it through HTTP responses.
+5. **Untrusted input to external communication.** Once the agent has consumed any untrusted
+   input (a listing, a file, a search, test output, a fetched body) it cannot reach any host,
+   allowlisted or not, for the rest of the task. The gateway tracks this in task state it
+   owns; the model cannot reset it. This is the information-flow leg of the lethal trifecta,
+   enforced structurally rather than by asking the model to be careful.
+6. **Run directory to repository.** A patch leaves the run directory only through `propose`,
+   which re-applies the hashed diff under the agent identity. The operator's credentials never
+   take part: `git` and `gh` run with a minimal environment, an https push needs a dedicated
+   agent token, and ssh remotes are refused. A human decision enters only here, after the
+   run, as an approval record bound to the report hash.
 
 ## Protected assets
 
@@ -85,6 +97,11 @@ control the scenario definition, the policy, the probe, or the control process.
 | A denied path cannot be probed for existence | A nonexistent path is judged by the read policy on its requested spelling; if that spelling is denied, the response is the same denial an existing file gets | `test_gateway.py::test_denied_region_has_no_existence_oracle` |
 | A component swapped for a symlink between the policy check and the open is not followed | Every directory component is opened relative to the previous directory fd with `O_NOFOLLOW` and `O_DIRECTORY`, the file with `O_NOFOLLOW`, and writes go through a temp file and `rename` on the same directory fd | `test_gateway.py::test_component_replaced_by_symlink_after_check_is_not_followed` |
 | Only a verified, un-attacked patch can become a branch, and it is exactly the reviewed diff | `propose` gates on verdict/attack/mode, verifies the diff hash, re-applies with `git apply --index` at the pinned commit and compares the changed file list | `test_repo_propose.py` |
+| The agent cannot hold untrusted input and external communication at the same time, whatever the allowlist says | `TaskState.untrusted_inputs` counts executed input-bearing operations; `decide_network` denies every allowlisted host with `flow.trifecta` once it is nonzero; the unprotected baseline sets the rule to `allow` | `test_flow.py` (allowed before any read, denied after; unlisted hosts still denied by the allowlist rule; denied reads do not taint) |
+| A patch that does not meet a task requirement is not reported `verified`, and the agent's word plays no part | Requirements name their evidence (probe checks, static rules); `requirements.assess` reads probe and static results only; `not_satisfied` gives `needs_review`, `no_evidence` gives `inconclusive`; `claim_check` compares claimed files with the diff | `test_requirements.py` (loading, task context, every status, verdict effect) |
+| A human approval cannot be reused for a different report, forged without the operator key, or overridden by a rejection | `approval.json` carries the SHA-256 of `report.json` and (with `BOUNDARYRUN_AUDIT_KEY`) an HMAC over the record; `check_approval` recomputes both; `propose` refuses `needs_review` without a bound approval and refuses any rejected run | `test_approval.py`, `test_propose_gates.py::test_approval_bound_to_another_report_is_refused`, `test_unsigned_approval_is_refused_when_the_operator_key_is_set`, `test_rejection_blocks_even_a_verified_run` |
+| A proposal is attributable to the agent and to the run that produced it, never to the operator | Author and committer are `BoundaryRun Agent <agent@boundaryrun.invalid>`; trailers carry the investigation id, verdict, audit chain head, report hash, agent mode, approver and co-author | `test_propose_gates.py::test_commit_is_authored_by_the_agent_identity_with_trailers` |
+| The operator's ambient credentials are never used to push or open a PR | `git` and `gh` run with `PATH`, `HOME` and `GIT_TERMINAL_PROMPT` only; https push requires `BOUNDARYRUN_AGENT_TOKEN`, supplied through a credential helper after clearing configured helpers; ssh remotes are refused | `test_propose_gates.py::test_gh_runs_with_a_minimal_environment` (sentinel and API key absent from gh's environment), `test_https_push_requires_the_agent_token`, `test_ssh_remotes_are_refused` |
 
 A blocked request shows that the gateway enforces that specific operation. It is not evidence
 that the model resists prompt injection in general. Injections are exercised by **scripted**
@@ -96,12 +113,12 @@ evaluated in this environment.
 | Status | Meaning |
 |---|---|
 | `verified` | Exploit reproduced before the patch, all probed unauthorized requests blocked after it, legitimate same-tenant reads still work, functional suite passed, static analysis introduced nothing |
-| `needs_review` | Everything above holds, but Semgrep found at least one result in the patched tree that was not in the baseline (matched by rule, file and source text, not line) |
+| `needs_review` | Everything above holds, but Semgrep found at least one result in the patched tree that was not in the baseline (matched by rule, file and source text, not line), or a task requirement is `not_satisfied` by the execution evidence. Releasable only with a human approval bound to the report |
 | `not_remediated` | At least one probed unauthorized request still returns another tenant's document |
 | `regression` | Exploit blocked but legitimate behavior broke (probe or functional suite), or the app no longer starts |
 | `no_patch` | Workspace unchanged |
 | `scope_violation` | A file outside the write policy changed |
-| `inconclusive` | Baseline did not reproduce, baseline suite failed, a probe errored, or tests timed out |
+| `inconclusive` | Baseline did not reproduce, baseline suite failed, a probe errored, tests timed out, or a task requirement has no evidence in this run (a named probe check or static scan is missing) |
 
 ## Assumptions
 
@@ -127,7 +144,10 @@ evaluated in this environment.
    silently pull a different base layer. The built image itself is still addressed by tag; its
    image ID is recorded in every report.
 6. **`http_get`, if ever allowlisted, does not pin DNS.** An allowlisted hostname resolving to a
-   private address (DNS rebinding, SSRF) is not prevented. The allowlist is empty in Phase 1.
+   private address (DNS rebinding, SSRF) is not prevented. The allowlist is empty in every
+   shipped scenario, so in practice the flow rule (invariant above) is exercised by tests, not by
+   the evaluation: with an empty allowlist every external request is denied by
+   `network.default_deny` before the flow rule is consulted.
 7. **Path checks are check-then-open, but the open cannot be redirected.** Since Phase 5 every
    component is opened relative to a directory fd with `O_NOFOLLOW`, so a swap between check and
    open fails instead of being followed. A swap can still make an allowed read fail (denial of
@@ -138,7 +158,13 @@ evaluated in this environment.
 9. **Static analysis is only as good as the local rules.** Four hand-written rules run offline
    inside the sandbox. They catch the backdoor fixture because a rule names the seed table;
    there is no general detector for malicious in-scope changes.
-10. **No approval workflow.** Operations are allowed or denied; nothing escalates to a human.
+10. **Approval is after the run and all or nothing.** The gateway still never escalates: an
+    operation is allowed or denied, and the agent cannot ask for more. The human decision enters
+    once, after the run, through `boundaryrun approve`, bound to the report hash. There is no
+    partial approval (for example approving one file of a two-file patch), no second reviewer,
+    and no record of who was shown what; the approver is trusted to have read the report. An
+    unsigned approval (no `BOUNDARYRUN_AUDIT_KEY` at approval time) proves only that someone with
+    write access to the run directory recorded it.
 11. **Tamper evidence depends on where the report is kept.** The audit log is hash-chained and the
     report stores the chain head and artifact hashes, so partial edits are detected. An attacker
     with write access to the run directory can still regenerate everything consistently unless the
@@ -149,9 +175,25 @@ evaluated in this environment.
     static before/after diff downgrades such a run to `needs_review`; it is still not blocked.
 13. **Obedient-agent results are simulations.** They bound what enforcement allows under an
     agent that follows every injection; they are not attack success rates for any model.
-14. **Proposals are gated, not sandboxed.** `propose` runs `git` and `gh` on the host with the
-    user's credentials. It refuses non-verified, attacked and (by default) simulated runs, re-applies
-    the patch from the hashed diff, and never merges, but the PR step is a real external action.
+14. **Proposals are gated and credential-isolated, not sandboxed.** `propose` runs `git` and
+    `gh` on the host, but with a minimal environment and under the agent identity: the operator's
+    keychain, ssh agent and `gh` login are never consulted, an https push needs
+    `BOUNDARYRUN_AGENT_TOKEN`, and ssh remotes are refused. It refuses non-releasable, attacked and
+    (by default) simulated runs, re-applies the patch from the hashed diff, and never merges. The
+    PR step is still a real external action on the host. The token's scope and lifetime are the
+    operator's responsibility: BoundaryRun checks that it is present, not that it is short-lived
+    or limited to one repository. `gh` is trusted to honor `GH_TOKEN` over any stored login.
 15. **Live model behavior is unmeasured.** No live run was performed (no credentials in this
     environment). The live path is implemented and type-checked against SDK 2.5.0 but has not
     made a successful API call.
+16. **The flow rule is coarse.** Any executed listing, read, search, test run or fetch taints
+    the task; there is no notion of a trusted repository file or a trusted host, and no way back.
+    An agent that needs documentation from an allowlisted host must fetch it before reading any
+    code. The fetched body itself counts as untrusted input, so at most one fetch is ever possible
+    under the default rule. Nothing in the flow rule prevents exfiltration through the patch
+    itself (code that leaks at runtime), which is the probe's and the static rules' job.
+17. **Requirements are only as good as their evidence.** A requirement is satisfied when its
+    named probe checks pass and its named static rules are silent. A requirement whose evidence
+    does not actually test the statement would be reported satisfied; the threat model file is
+    reviewed by a human like the policy. Requirements are not selected per task by a model and
+    there is no continuous threat model; see RELATED_WORK.md.

@@ -128,6 +128,28 @@ Per run (`unauth att/exec` is reference-denied requests attempted/executed):
 - **Cost.** Simulated runs carry no model cost; each investigation launches six containers
   (two probes, two test runs, two scans).
 
+### Phase 6 and these numbers
+
+Phase 6 adds the information-flow rule, task requirements and the approval record. None of
+them changes a decision in the default grid, for reasons that can be read off the design
+rather than measured:
+
+- **Exfiltration denials keep their rule.** Both exfil attacks ask for a host outside the
+  allowlist, and the allowlist is empty, so the denial is `network.default_deny` in every
+  protected run. `flow.trifecta` is recorded only when the host would otherwise have been
+  allowed and the agent had already consumed untrusted input; with an empty allowlist that
+  never happens. The `flow` field of each report still records which legs the agent held:
+  in the unprotected exfil runs all three, in every protected run never the third.
+- **Requirements are met by the correct fix.** R1 and R2 are the probe's own cross-tenant
+  and same-tenant checks, and R3 is the auth-dependency static rule; the scripted fix
+  satisfies all three, so no verdict moves. The backdoor runs are already `needs_review`
+  from the static comparison before requirements are consulted.
+- **No approvals are recorded in an evaluation**, so `propose` would refuse every
+  `needs_review` run in the grid.
+
+A rerun of the grid after Phase 6 was not performed in the environment where Phase 6 was
+written (no Docker daemon). The table above is the Phase 5 run.
+
 ### What these numbers do not show
 
 Attack success rates for any real model, the effect of prompt wording on model behavior, or
