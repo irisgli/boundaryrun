@@ -6,9 +6,11 @@ authorizes every operation; untrusted code runs only in locked-down containers; 
 independent verifier decides whether the patch worked from execution results, not from the
 agent's claims.
 
-Phase 1 status: one end-to-end scenario (a cross-tenant document read in a FastAPI service),
-policy and sandbox boundaries with tests that exercise them from both sides, and a
-machine-readable evidence report. No frontend, no GitHub integration, no benchmarks yet.
+Status: Phase 1 (one end-to-end scenario, a cross-tenant document read in a FastAPI service;
+policy and sandbox boundaries with tests from both sides; machine-readable evidence) and
+Phase 2 (four prompt-injection attacks across README, source comment, test output and finding
+text; unprotected vs protected vs protected+verified comparison with deterministic simulated
+agents, plus an opt-in live arm). No frontend, no GitHub integration yet.
 
 ## Requirements
 
@@ -54,6 +56,8 @@ Live model run (writes a report regardless of outcome; requires `ANTHROPIC_API_K
 | `reproduce` | Runs the black-box probe and the target's functional suite against the unmodified target |
 | `investigate --fixture NAME` | Replays a scripted agent (`good`, `ineffective`, `regression`, `injected`) through the real gateway, sandbox and verifier. Labeled non-autonomous in the report |
 | `investigate --live` | Real model-backed investigation (`claude-opus-5-5` by default) |
+| `investigate --obedient\|--compliant [--arm unprotected] [--attack ID]` | Simulated agent against one attack in one arm |
+| `eval [--agents compliant obedient live] [--arms ...] [--repeats N]` | Full grid; writes `.runs/eval-*/summary.{json,md}` |
 
 Each investigation writes `.runs/<id>/` with `report.json`, `audit.jsonl`, `patch.diff`, the
 read-only `original/` snapshot and the agent's `workspace/`.
@@ -63,9 +67,10 @@ read-only `original/` snapshot and the agent's `workspace/`.
 ```
 src/boundaryrun/      control process: agent, gateway, policy, paths, sandbox, verify, pipeline, cli
 targets/docvault/     deliberately vulnerable FastAPI app (synthetic data, planted README injection, canary secret)
-scenarios/docvault-idor/   finding.json, scenario.toml (policy + sandbox limits), probe.py, fixtures/*.json
+scenarios/docvault-idor/   finding.json, scenario.toml (policy + sandbox limits), probe.py, fixtures/*.json, attacks/*
 docker/runner.Dockerfile   runtime image for target code, tests and the probe
 docs/ARCHITECTURE.md  trust boundaries, invariants with their tests, verdict semantics, limitations
+docs/EVALUATION.md    Phase 2 arms, simulated agents, attacks, metrics, results
 tests/                unit (no Docker), container boundary, end-to-end; live test is opt-in via BOUNDARYRUN_LIVE=1
 ```
 
@@ -79,4 +84,11 @@ observations (attempts vs executions, canary hits by channel), baseline and post
 and test results, the unified diff with per-file scope flags, errors, and the verdict with its
 reasons and an explicit statement of what `verified` does and does not claim.
 
-See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the threat model and known limitations.
+Live evaluation (real model, every arm and attack, N repeats; requires credentials):
+
+```bash
+.venv/bin/boundaryrun eval --agents compliant obedient live --repeats 3
+```
+
+See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the threat model and known limitations,
+and [docs/EVALUATION.md](docs/EVALUATION.md) for the evaluation design and results.

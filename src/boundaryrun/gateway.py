@@ -96,6 +96,7 @@ class AuditRecord(BaseModel):
     tool: str
     input: dict[str, Any] | None
     decision: pol.Decision
+    reference_decision: pol.Decision | None = None  # what the reference policy would have decided
     outcome: Outcome
     output_bytes: int = 0
     output_sha256: str | None = None
@@ -141,9 +142,13 @@ class Gateway:
         policy: pol.Policy,
         test_runner: TestRunner | None = None,
         redact: Callable[[str], str] = lambda s: s,
+        http_executor: HttpExecutor | None = None,
+        reference_policy: pol.Policy | None = None,
     ) -> None:
         self.root = workspace.resolve()
         self.policy = policy
+        self.reference_policy = reference_policy
+        self._http = http_executor or real_http_get
         self.state = pol.TaskState()
         self.audit: list[AuditRecord] = []
         self.agent_claim: SubmitRemediation | None = None
@@ -157,6 +162,7 @@ class Gateway:
         tool_name = tool if isinstance(tool, str) else repr(tool)
         echo = self._echo(raw_input)
         self.state.tool_calls += 1
+        reference: pol.Decision | None = None
 
         def record(decision: pol.Decision, outcome: Outcome, content: str = "", error: str | None = None):
             data = content.encode()
@@ -167,6 +173,7 @@ class Gateway:
                     tool=self._redact(tool_name[:100]),
                     input=echo,
                     decision=decision,
+                    reference_decision=reference if reference is not None else (decision if self.reference_policy else None),
                     outcome=outcome,
                     output_bytes=len(data),
                     output_sha256=hashlib.sha256(data).hexdigest() if data else None,
@@ -201,6 +208,8 @@ class Gateway:
             record(d, "rejected")
             return ToolOutcome(status="denied", content=f"REJECTED [{d.rule}]: {d.reason}")
 
+        if self.reference_policy is not None:
+            reference = self._reference_decision(tool_name, req)
         try:
             decision, content = getattr(self, f"_op_{tool_name}")(req)
         except PathRejected as e:
@@ -302,18 +311,44 @@ class Gateway:
         d = pol.decide_network(self.policy, req.url)
         if d.effect == "deny":
             return d, ""
-        opener = urllib.request.build_opener(_NoRedirect)
         try:
-            with opener.open(urllib.request.Request(req.url, method="GET"), timeout=10) as resp:
-                body = resp.read(65536).decode("utf-8", "replace")
-                return d, f"status={resp.status}\n{_UNTRUSTED}{body}"
-        except Exception as e:
+            status, body = self._http(req.url)
+        except Exception as e:  # noqa: BLE001 - any network failure is reported, never propagated
             raise _ExecError(d, f"request failed: {type(e).__name__}") from None
+        return d, f"status={status}\n{_UNTRUSTED}{body}"
 
     def _op_submit_remediation(self, req: SubmitRemediation) -> tuple[pol.Decision, str]:
         self.agent_claim = req
         self.state.submitted = True
         return pol.allow("task.submit", "agent claim recorded; verification is independent"), "submission recorded"
+
+    def _reference_decision(self, tool_name: str, req: _Input) -> pol.Decision:
+        """Decide the request under the reference policy without executing anything.
+
+        Used by the evaluation to classify requests consistently across arms: an
+        unprotected arm executes a request, and this records that the reference policy
+        would have denied it.
+        """
+        ref = self.reference_policy
+        assert ref is not None
+        try:
+            if isinstance(req, ReadFile):
+                return pol.decide_read(ref, canonicalize(self.root, req.path))
+            if isinstance(req, EditFile):
+                rel = canonicalize(self.root, req.path)
+                rd = pol.decide_read(ref, rel)
+                if rd.effect == "deny":
+                    return pol.deny("write.unreadable", f"edit requires read access: {rd.reason}")
+                return pol.decide_write(ref, self.state, rel, 0)
+            if isinstance(req, ListFiles) and req.directory != ".":
+                canonicalize(self.root, req.directory, allow_dir=True)
+        except PathRejected as e:
+            return pol.deny(f"path.{e.code}", e.detail)
+        if isinstance(req, HttpGet):
+            return pol.decide_network(ref, req.url)
+        if isinstance(req, RunFunctionalTests):
+            return pol.decide_tests(ref, self.state)
+        return pol.allow("reference.allow", "operation carries no policy risk")
 
     # -- helpers ----------------------------------------------------------------------
 
@@ -350,6 +385,15 @@ class Gateway:
             else:
                 out[key] = self._redact(repr(v)[:_MAX_INPUT_ECHO])
         return out
+
+
+HttpExecutor = Callable[[str], tuple[int, str]]
+
+
+def real_http_get(url: str) -> tuple[int, str]:
+    opener = urllib.request.build_opener(_NoRedirect)
+    with opener.open(urllib.request.Request(url, method="GET"), timeout=10) as resp:
+        return resp.status, resp.read(65536).decode("utf-8", "replace")
 
 
 class _ExecError(Exception):

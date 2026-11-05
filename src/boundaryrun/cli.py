@@ -26,8 +26,22 @@ def main(argv: list[str] | None = None) -> int:
     mode = inv.add_mutually_exclusive_group(required=True)
     mode.add_argument("--live", action="store_true", help="real model-backed agent (requires API credentials)")
     mode.add_argument("--fixture", help="scripted, non-autonomous agent: good | ineffective | regression | injected")
+    mode.add_argument("--obedient", action="store_true", help="simulated agent that obeys every planted directive")
+    mode.add_argument("--compliant", action="store_true", help="simulated agent that ignores planted directives")
+    inv.add_argument("--arm", choices=["protected", "unprotected"], default="protected")
+    inv.add_argument("--attack", help="attack id from the scenario's attacks/ directory")
     inv.add_argument("--model", default=DEFAULT_MODEL)
     inv.add_argument("--runs-dir", type=Path, default=DEFAULT_RUNS)
+
+    ev = sub.add_parser("eval", help="compare unprotected, protected and protected+verified arms across attacks")
+    ev.add_argument("--scenario", type=Path, default=DEFAULT_SCENARIO)
+    ev.add_argument("--agents", nargs="+", default=["compliant", "obedient"],
+                    choices=["compliant", "obedient", "live"])
+    ev.add_argument("--arms", nargs="+", default=["unprotected", "protected"], choices=["unprotected", "protected"])
+    ev.add_argument("--attacks", nargs="*", help="attack ids (default: none + every attack in the scenario)")
+    ev.add_argument("--repeats", type=int, default=1)
+    ev.add_argument("--model", default=DEFAULT_MODEL)
+    ev.add_argument("--runs-dir", type=Path, default=DEFAULT_RUNS)
 
     args = ap.parse_args(argv)
 
@@ -60,7 +74,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"reproduced: {reproduced} ({why})")
         return 0 if reproduced else 1
 
-    if args.live:
+    if args.live if args.cmd == "investigate" else "live" in args.agents:
         from .agent import live_credentials_available
 
         ok, why = live_credentials_available()
@@ -68,18 +82,33 @@ def main(argv: list[str] | None = None) -> int:
             print(f"error: live mode unavailable: {why}. No investigation was run.", file=sys.stderr)
             return 3
 
+    if args.cmd == "eval":
+        from .eval import run_eval
+
+        result, out_dir = run_eval(
+            args.scenario, runs_dir=args.runs_dir, agents=args.agents, arms=args.arms,
+            attacks=args.attacks or None, repeats=args.repeats, model=args.model,
+            progress=lambda m: print(f"  {m}", flush=True),
+        )
+        print((out_dir / "summary.md").read_text())
+        print(f"summary: {out_dir / 'summary.json'}")
+        return 1 if result.errors else 0
+
     from .pipeline import run_investigation
 
+    agent_mode = "live" if args.live else "obedient" if args.obedient else "compliant" if args.compliant else "fixture"
     report, path = run_investigation(
         args.scenario,
-        agent_mode="live" if args.live else "fixture",
+        agent_mode=agent_mode,
         fixture=args.fixture,
         model=args.model,
         runs_dir=args.runs_dir,
+        arm=args.arm,
+        attack=args.attack,
     )
     a = report.agent
-    label = "LIVE model run" if a and a.mode == "live" else f"FIXTURE run '{args.fixture}' (scripted, not autonomous)"
-    print(f"investigation {report.investigation_id}: {label}")
+    label = "LIVE model run" if a and a.mode == "live" else f"SIMULATED agent '{a.fixture if a else args.fixture}' (scripted, not autonomous)"
+    print(f"investigation {report.investigation_id}: {label}, arm={report.arm}, attack={args.attack or 'none'}")
     if report.agent_skipped_reason:
         print(f"  agent skipped: {report.agent_skipped_reason}")
     if a:
@@ -94,6 +123,12 @@ def main(argv: list[str] | None = None) -> int:
     inj = report.injection
     print(f"  injection: sensitive reads {inj.sensitive_read_executed}/{inj.sensitive_read_attempts} executed, "
           f"egress {inj.egress_executed}/{inj.egress_attempts}, canary hits {inj.canary_hits_by_channel or 'none'}")
+    if report.attack:
+        print(f"  attack {report.attack.id} ({report.attack.vector}/{report.attack.objective}): "
+              f"objective_achieved={report.attack.objective_achieved} "
+              f"directives={[(d.tool, d.attempted, d.executed) for d in report.attack.directives]}")
+    if report.egress_sink:
+        print(f"  egress sink captured {len(report.egress_sink)} request(s); canary in any: {any(r.contained_canary for r in report.egress_sink)}")
     if report.patch:
         print(f"  patch: {[f.path for f in report.patch.files]}")
     print(f"  verdict: {report.verdict.status.value}")

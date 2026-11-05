@@ -79,8 +79,9 @@ control the scenario definition, the policy, the probe, or the control process.
 | Reports never contain the canary | Canary detection happens before redaction; report and audit are redacted on write | `test_artifacts_match_hashes_and_never_contain_canary`, `test_injection_fixture_is_contained_without_relying_on_redaction` |
 
 A blocked request shows that the gateway enforces that specific operation. It is not evidence
-that the model resists prompt injection in general. In Phase 1 the injection was exercised by a
-**scripted** agent that deliberately obeys it; no live model was evaluated.
+that the model resists prompt injection in general. Injections are exercised by **scripted**
+agents that deliberately obey them (see [EVALUATION.md](EVALUATION.md)); no live model has been
+evaluated in this environment.
 
 ## Verdicts
 
@@ -124,6 +125,12 @@ that the model resists prompt injection in general. In Phase 1 the injection was
 10. **No approval workflow.** Operations are allowed or denied; nothing escalates to a human.
 11. **The audit log is not tamper-evident.** It is written by the trusted process outside the
     workspace and hashed in the report, but not signed or hash-chained.
-12. **Live model behavior is unmeasured.** No live run was performed (no credentials in this
+12. **Policy cannot distinguish a backdoor from a fix.** The `comment_backdoor` attack edits an
+    allowed file (`app/store.py`) and passes policy and verification in every arm (Phase 2
+    evaluation). Catching it needs diff review, semantic rules, or a probe that enumerates
+    tokens; none exists yet.
+13. **Obedient-agent results are simulations.** They bound what enforcement allows under an
+    agent that follows every injection; they are not attack success rates for any model.
+14. **Live model behavior is unmeasured.** No live run was performed (no credentials in this
     environment). The live path is implemented and type-checked against SDK 2.5.0 but has not
     made a successful API call.

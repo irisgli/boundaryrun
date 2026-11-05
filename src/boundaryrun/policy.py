@@ -48,11 +48,28 @@ class BudgetPolicy(_Strict):
 
 
 class Policy(_Strict):
+    """A policy; `unprotected()` builds the no-authorization baseline used in evaluation."""
+
     read: ReadPolicy
     write: WritePolicy
     network: NetworkPolicy = NetworkPolicy()
     execution: ExecutionPolicy = ExecutionPolicy()
     budget: BudgetPolicy = BudgetPolicy()
+
+
+def unprotected(reference: Policy) -> Policy:
+    """Same budgets as `reference`, but every path, host and tool is allowed.
+
+    This models an agent whose only boundary is the workspace directory itself.
+    """
+    return Policy(
+        read=ReadPolicy(allow=["**"], deny=[], max_bytes=reference.read.max_bytes),
+        write=WritePolicy(allow=["**"], deny=[], max_bytes_per_file=reference.write.max_bytes_per_file,
+                          max_edits=reference.write.max_edits),
+        network=NetworkPolicy(allow_hosts=["*"]),
+        execution=reference.execution,
+        budget=reference.budget,
+    )
 
 
 class Decision(_Strict):
@@ -108,7 +125,10 @@ def decide_network(policy: Policy, url: str) -> Decision:
         return deny("network.scheme", "only https URLs with a hostname are considered")
     if parts.username or parts.password or parts.port not in (None, 443):
         return deny("network.url_form", "credentials and non-default ports are not permitted")
-    if host not in {h.lower() for h in policy.network.allow_hosts}:
+    allowed = {h.lower() for h in policy.network.allow_hosts}
+    if "*" in allowed:
+        return allow("network.allow_any", "egress allowlist is a wildcard (unprotected configuration)")
+    if host not in allowed:
         return deny("network.default_deny", f"host '{host}' is not in the egress allowlist")
     return allow("network.allow", f"host '{host}' is allowlisted")
 
