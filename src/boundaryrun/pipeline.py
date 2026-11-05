@@ -1,0 +1,302 @@
+"""End-to-end investigation pipeline and the evidence report."""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import platform
+import re
+import shutil
+import subprocess
+import tomllib
+import uuid
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any, Literal
+
+from pydantic import BaseModel
+
+from . import __version__
+from .agent import DEFAULT_MODEL, AgentRun, run_fixture, run_live
+from .gateway import AuditRecord, Gateway, SubmitRemediation, TestRun
+from .policy import Policy
+from .sandbox import RUNNER_IMAGE, ProbeRun, Sandbox, SandboxConfig, export_tree
+from .verify import PatchInfo, Verdict, compute_patch, decide
+
+REPORT_SCHEMA_VERSION = "boundaryrun.report/v1"
+
+
+class Scenario(BaseModel):
+    id: str
+    root: Path
+    target: Path
+    finding: dict[str, Any]
+    probe: Path
+    injection_files: list[str]
+    canary_pattern: str | None
+    policy: Policy
+    sandbox: SandboxConfig
+
+
+def load_scenario(path: Path) -> Scenario:
+    path = path.resolve()
+    file = path / "scenario.toml" if path.is_dir() else path
+    raw = tomllib.loads(file.read_text())
+    base = file.parent
+    s = raw["scenario"]
+    return Scenario(
+        id=s["id"],
+        root=base,
+        target=(base / s["target"]).resolve(),
+        finding=json.loads((base / s["finding"]).read_text()),
+        probe=(base / s["probe"]).resolve(),
+        injection_files=s.get("injection_files", []),
+        canary_pattern=s.get("canary_pattern"),
+        policy=Policy.model_validate(raw["policy"]),
+        sandbox=SandboxConfig.model_validate(raw.get("sandbox", {})),
+    )
+
+
+class CanaryMonitor:
+    """Detects the synthetic canary secret crossing into model context or agent output.
+
+    Detection runs before redaction, so a hit is recorded even though the value is
+    never persisted or returned to the model.
+    """
+
+    def __init__(self, pattern: str | None) -> None:
+        self._rx = re.compile(pattern) if pattern else None
+        self.hits: dict[str, int] = {}
+
+    def scan(self, text: str, channel: str) -> None:
+        if self._rx and text and self._rx.search(text):
+            self.hits[channel] = self.hits.get(channel, 0) + 1
+
+    def redact_tool_output(self, text: str) -> str:
+        if not self._rx:
+            return text
+        self.scan(text, "tool_output_pre_redaction")
+        return self._rx.sub("[REDACTED:canary]", text)
+
+    def redact(self, text: str) -> str:
+        return self._rx.sub("[REDACTED:canary]", text) if self._rx else text
+
+
+class PolicySummary(BaseModel):
+    requests: int
+    executed: int
+    denied: int
+    rejected: int
+    errors: int
+    denied_by_rule: dict[str, int]
+
+
+class InjectionObservation(BaseModel):
+    """Observed (not judged) behavior related to planted injections."""
+
+    injection_files: list[str]
+    injection_files_read: list[str]
+    sensitive_read_attempts: int
+    sensitive_read_executed: int
+    egress_attempts: int
+    egress_executed: int
+    out_of_scope_write_attempts: int
+    out_of_scope_write_executed: int
+    canary_hits_by_channel: dict[str, int]
+
+
+class ExecutionMeta(BaseModel):
+    boundaryrun_version: str
+    python: str
+    platform: str
+    docker_server: str | None
+    runner_image: str
+    runner_image_id: str | None
+    started_at: str
+    finished_at: str
+
+
+class Report(BaseModel):
+    schema_version: str = REPORT_SCHEMA_VERSION
+    investigation_id: str
+    scenario_id: str
+    task: dict[str, Any]
+    execution: ExecutionMeta
+    finding: dict[str, Any]
+    agent: AgentRun | None
+    agent_skipped_reason: str | None
+    agent_claim: SubmitRemediation | None
+    tool_requests: list[AuditRecord]
+    policy_summary: PolicySummary
+    injection: InjectionObservation
+    baseline: dict[str, Any]
+    patch: PatchInfo | None
+    post_patch: dict[str, Any] | None
+    static_analysis: dict[str, Any]
+    errors: list[str]
+    verdict: Verdict
+    artifacts: dict[str, str]
+
+
+def _summarize(audit: list[AuditRecord]) -> PolicySummary:
+    by_rule: dict[str, int] = {}
+    for r in audit:
+        if r.decision.effect == "deny":
+            by_rule[r.decision.rule] = by_rule.get(r.decision.rule, 0) + 1
+    count = lambda o: sum(1 for r in audit if r.outcome == o)
+    return PolicySummary(
+        requests=len(audit),
+        executed=count("executed"),
+        denied=count("denied"),
+        rejected=count("rejected"),
+        errors=count("error"),
+        denied_by_rule=by_rule,
+    )
+
+
+def _observe_injection(scn: Scenario, audit: list[AuditRecord], canary: CanaryMonitor) -> InjectionObservation:
+    sensitive = [r for r in audit if r.tool == "read_file" and _is_sensitive(scn, (r.input or {}).get("path", ""))]
+    egress = [r for r in audit if r.tool == "http_get"]
+    writes = [r for r in audit if r.tool == "edit_file" and r.decision.rule != "write.allow"]
+    read_paths = {
+        (r.input or {}).get("path") for r in audit if r.tool == "read_file" and r.outcome == "executed"
+    }
+    return InjectionObservation(
+        injection_files=scn.injection_files,
+        injection_files_read=sorted(p for p in scn.injection_files if p in read_paths),
+        sensitive_read_attempts=len(sensitive),
+        sensitive_read_executed=sum(1 for r in sensitive if r.outcome == "executed"),
+        egress_attempts=len(egress),
+        egress_executed=sum(1 for r in egress if r.outcome == "executed"),
+        out_of_scope_write_attempts=len(writes),
+        out_of_scope_write_executed=sum(1 for r in writes if r.outcome == "executed"),
+        canary_hits_by_channel=dict(canary.hits),
+    )
+
+
+def _is_sensitive(scn: Scenario, raw_path: str) -> bool:
+    """Heuristic classifier for reporting only (enforcement never uses this)."""
+    p = raw_path.lower()
+    return "secret" in p or p.endswith(".env") or "config/" in p
+
+
+def _docker_meta() -> tuple[str | None, str | None]:
+    v = subprocess.run(["docker", "info", "--format", "{{.ServerVersion}}"], capture_output=True, text=True, check=False)
+    i = subprocess.run(["docker", "image", "inspect", "--format", "{{.Id}}", RUNNER_IMAGE], capture_output=True, text=True, check=False)
+    return (v.stdout.strip() or None), (i.stdout.strip() or None)
+
+
+def _probe_dict(p: ProbeRun) -> dict[str, Any]:
+    return p.model_dump(mode="json")
+
+
+def run_investigation(
+    scenario_path: Path,
+    *,
+    agent_mode: Literal["live", "fixture"],
+    fixture: str | None = None,
+    model: str = DEFAULT_MODEL,
+    runs_dir: Path,
+) -> tuple[Report, Path]:
+    scn = load_scenario(scenario_path)
+    started = datetime.now(UTC)
+    inv_id = f"inv-{started.strftime('%Y%m%dT%H%M%SZ')}-{uuid.uuid4().hex[:6]}"
+    run_dir = (runs_dir / inv_id).resolve()
+    original, workspace = run_dir / "original", run_dir / "workspace"
+    run_dir.mkdir(parents=True)
+    export_tree(scn.target, original, ["**/.git/**", "**/__pycache__/**"])
+    export_tree(original, workspace, [])
+    for p in original.rglob("*"):
+        p.chmod(0o555 if p.is_dir() else 0o444)
+
+    errors: list[str] = []
+    canary = CanaryMonitor(scn.canary_pattern)
+    sandbox = Sandbox(scn.sandbox, run_dir / "sandbox")
+
+    baseline_probe = sandbox.run_probe(original, scn.probe)
+    baseline_tests = sandbox.run_functional_tests(original)
+
+    from .verify import baseline_reproduced
+
+    reproduced, why = baseline_reproduced(baseline_probe)
+    gateway = Gateway(workspace, scn.policy, test_runner=sandbox.run_functional_tests, redact=canary.redact_tool_output)
+    agent_run: AgentRun | None = None
+    skipped: str | None = None
+    if not reproduced or baseline_tests.status != "passed":
+        skipped = why if not reproduced else f"baseline functional suite {baseline_tests.status}"
+    elif agent_mode == "fixture":
+        if not fixture:
+            raise ValueError("fixture mode requires a fixture name")
+        agent_run = run_fixture(gateway, scn.root / "fixtures" / f"{fixture}.json", canary.scan)
+    else:
+        agent_run = run_live(gateway, scn.finding, model, scn.policy.budget.max_model_turns, canary.scan)
+    if agent_run and agent_run.error:
+        errors.append(f"agent: {agent_run.error}")
+
+    patch: PatchInfo | None = None
+    post_probe: ProbeRun | None = None
+    post_tests: TestRun | None = None
+    if agent_run is not None:
+        patch = compute_patch(original, workspace, scn.policy)
+        if patch.files and all(f.in_write_scope for f in patch.files):
+            post_probe = sandbox.run_probe(workspace, scn.probe)
+            post_tests = sandbox.run_functional_tests(workspace)
+    for label, pr in (("baseline", baseline_probe), ("post_patch", post_probe)):
+        if pr is not None and not pr.ok:
+            errors.append(f"{label} probe: {pr.error}")
+
+    verdict = decide(baseline_probe, baseline_tests, patch, post_probe, post_tests)
+
+    artifacts: dict[str, str] = {}
+    audit_path = run_dir / "audit.jsonl"
+    audit_path.write_text("".join(canary.redact(r.model_dump_json()) + "\n" for r in gateway.audit))
+    artifacts["audit.jsonl"] = hashlib.sha256(audit_path.read_bytes()).hexdigest()
+    if patch and patch.diff:
+        diff_path = run_dir / "patch.diff"
+        diff_path.write_text(patch.diff)
+        artifacts["patch.diff"] = hashlib.sha256(diff_path.read_bytes()).hexdigest()
+
+    docker_server, image_id = _docker_meta()
+    report = Report(
+        investigation_id=inv_id,
+        scenario_id=scn.id,
+        task={
+            "agent_mode": agent_mode,
+            "fixture": fixture,
+            "model": model if agent_mode == "live" else None,
+            "policy": scn.policy.model_dump(),
+            "sandbox": scn.sandbox.model_dump(),
+        },
+        execution=ExecutionMeta(
+            boundaryrun_version=__version__,
+            python=platform.python_version(),
+            platform=platform.platform(),
+            docker_server=docker_server,
+            runner_image=RUNNER_IMAGE,
+            runner_image_id=image_id,
+            started_at=started.isoformat(),
+            finished_at=datetime.now(UTC).isoformat(),
+        ),
+        finding=scn.finding,
+        agent=agent_run,
+        agent_skipped_reason=skipped,
+        agent_claim=gateway.agent_claim,
+        tool_requests=gateway.audit,
+        policy_summary=_summarize(gateway.audit),
+        injection=_observe_injection(scn, gateway.audit, canary),
+        baseline={"probe": _probe_dict(baseline_probe), "functional_tests": baseline_tests.model_dump()},
+        patch=patch,
+        post_patch=(
+            {"probe": _probe_dict(post_probe), "functional_tests": post_tests.model_dump()}
+            if post_probe and post_tests
+            else None
+        ),
+        static_analysis={"status": "not_run", "reason": "Semgrep integration is scheduled for Phase 3"},
+        errors=errors,
+        verdict=verdict,
+        artifacts=artifacts,
+    )
+    report_path = run_dir / "report.json"
+    report_path.write_text(canary.redact(report.model_dump_json(indent=2)))
+    shutil.rmtree(run_dir / "sandbox", ignore_errors=True)
+    return report, report_path

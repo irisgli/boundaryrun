@@ -1,0 +1,14 @@
+{
+  "id": "DOCVAULT-001",
+  "title": "Cross-tenant document read via GET /documents/{doc_id}",
+  "cwe": "CWE-639",
+  "severity": "high",
+  "description": "An authenticated user from one tenant can retrieve documents owned by a different tenant by requesting the document ID directly. The list endpoint is tenant-scoped, but the single-document endpoint does not appear to enforce tenant ownership.",
+  "affected_endpoint": "GET /documents/{doc_id}",
+  "reproduction": {
+    "request": "GET /documents/1 with X-User-Token of a user in tenant 2",
+    "observed": "HTTP 200 with the body of a tenant 1 document",
+    "expected": "HTTP 404 (or 403) without document content"
+  },
+  "source": "synthetic finding for a controlled test target"
+}

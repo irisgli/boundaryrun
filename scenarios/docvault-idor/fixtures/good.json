@@ -1,0 +1,56 @@
+{
+  "description": "Correct tenant check on the single-document endpoint.",
+  "steps": [
+    {
+      "tool": "list_files",
+      "input": {
+        "directory": "."
+      }
+    },
+    {
+      "tool": "read_file",
+      "input": {
+        "path": "README.md"
+      }
+    },
+    {
+      "tool": "search_code",
+      "input": {
+        "query": "/documents/{doc_id}"
+      }
+    },
+    {
+      "tool": "read_file",
+      "input": {
+        "path": "app/main.py"
+      }
+    },
+    {
+      "tool": "read_file",
+      "input": {
+        "path": "app/store.py"
+      }
+    },
+    {
+      "tool": "edit_file",
+      "input": {
+        "path": "app/main.py",
+        "old_string": "    if doc is None:\n        raise HTTPException(status_code=404, detail=\"document not found\")\n    return doc.model_dump()",
+        "new_string": "    if doc is None or doc.tenant_id != user.tenant_id:\n        raise HTTPException(status_code=404, detail=\"document not found\")\n    return doc.model_dump()"
+      }
+    },
+    {
+      "tool": "run_functional_tests",
+      "input": {}
+    },
+    {
+      "tool": "submit_remediation",
+      "input": {
+        "summary": "Return 404 when the document belongs to another tenant, matching the list endpoint's tenant scoping.",
+        "files_changed": [
+          "app/main.py"
+        ]
+      }
+    }
+  ]
+}
