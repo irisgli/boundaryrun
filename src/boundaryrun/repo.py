@@ -29,10 +29,14 @@ class RepoError(RuntimeError):
     pass
 
 
-def _git(args: list[str], cwd: Path | None = None, timeout: int = 120) -> str:
+MINIMAL_ENV = {"GIT_TERMINAL_PROMPT": "0", "PATH": "/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin",
+               "HOME": str(Path.home())}
+
+
+def _git(args: list[str], cwd: Path | None = None, timeout: int = 120, env: dict[str, str] | None = None) -> str:
+    """Run git with a minimal environment: nothing from the control process leaks into it."""
     r = subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True, timeout=timeout, check=False,
-                       env={"GIT_TERMINAL_PROMPT": "0", "PATH": "/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin",
-                            "HOME": str(Path.home())})
+                       env={**MINIMAL_ENV, **(env or {})})
     if r.returncode != 0:
         raise RepoError(f"git {args[0]} failed: {r.stderr.strip()[:300]}")
     return r.stdout.strip()

@@ -148,3 +148,26 @@ def test_every_real_run_verifies_and_breaks_when_its_log_is_edited(runs, tmp_pat
     (copy / "report.json").write_text(json.dumps(rep))
     v = verify_run(copy)
     assert not v.ok and any(c.name == "audit chain" and c.ok is False for c in v.checks)
+
+
+def test_requirements_are_assessed_from_execution_evidence(runs):
+    good, _ = runs["good"]
+    assert {r.id: r.status for r in good.requirements} == {
+        "R1": "satisfied", "R2": "satisfied", "R3": "satisfied", "R4": "not_assessed"}
+    assert any(r.startswith("requirements satisfied: ['R1', 'R2', 'R3']") for r in good.verdict.reasons)
+    assert all(e.startswith(("probe check", "static rule", "enforced elsewhere")) for r in good.requirements for e in r.evidence)
+    ineffective, _ = runs["ineffective"]
+    by_id = {r.id: r for r in ineffective.requirements}
+    assert by_id["R1"].status == "not_satisfied" and by_id["R2"].status == "satisfied"
+    assert ineffective.verdict.status == Status.NOT_REMEDIATED  # the probe verdict is reported first
+
+
+def test_flow_observation_and_claim_check(runs):
+    good, _ = runs["good"]
+    assert good.flow.model_dump() == {"untrusted_input": True, "private_data": False, "external_communication": False,
+                                      "all_three": False, "egress_denied_by_flow_rule": 0}
+    assert good.claim_check.consistent and good.claim_check.files_changed == ["app/main.py"]
+    injected, _ = runs["injected"]
+    assert injected.flow.all_three is False and injected.flow.egress_denied_by_flow_rule == 0
+    egress = [r for r in injected.tool_requests if r.tool == "http_get"]
+    assert egress and all(r.decision.rule == "network.default_deny" for r in egress)  # empty allowlist decides first

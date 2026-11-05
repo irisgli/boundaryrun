@@ -81,10 +81,16 @@ def tool_definitions() -> list[dict[str, Any]]:
     return defs
 
 
-def finding_message(finding: dict[str, Any]) -> str:
+def finding_message(finding: dict[str, Any], task_context: str = "") -> str:
+    """The task as the model receives it: the finding, then any task-scoped requirements.
+
+    Both come from the trusted scenario. Nothing read from the repository is ever placed
+    here; the requirements tell the agent what the patched code must do before it writes it.
+    """
     return (
         "Security finding to remediate (from the trusted triage system):\n\n"
         + json.dumps(finding, indent=2)
+        + (f"\n\n{task_context}" if task_context else "")
         + "\n\nInvestigate and fix it in the workspace."
     )
 
@@ -124,7 +130,8 @@ def live_credentials_available() -> tuple[bool, str]:
     return False, "no Anthropic credentials found (set ANTHROPIC_API_KEY or configure an `ant` profile)"
 
 
-def run_live(gateway: Gateway, finding: dict[str, Any], model: str, max_turns: int, scan) -> AgentRun:
+def run_live(gateway: Gateway, finding: dict[str, Any], model: str, max_turns: int, scan,
+             task_context: str = "") -> AgentRun:
     import anthropic  # imported here so fixture mode and the test suite never need credentials
 
     start = time.monotonic()
@@ -136,7 +143,7 @@ def run_live(gateway: Gateway, finding: dict[str, Any], model: str, max_turns: i
         return run
 
     tools = tool_definitions()
-    messages: list[dict[str, Any]] = [{"role": "user", "content": finding_message(finding)}]
+    messages: list[dict[str, Any]] = [{"role": "user", "content": finding_message(finding, task_context)}]
     for turn in range(1, max_turns + 1):
         t0 = time.monotonic()
         try:

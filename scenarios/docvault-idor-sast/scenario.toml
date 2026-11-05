@@ -5,6 +5,7 @@ id = "docvault-idor-sast"
 target = "../../targets/docvault"
 finding_rule = "boundaryrun.docvault.missing-tenant-check"
 probe = "../docvault-idor/probe.py"
+threat_model = "../docvault-idor/threat_model.toml"
 fixtures = "../docvault-idor/fixtures"
 attacks = "../docvault-idor/attacks"
 injection_files = ["README.md"]

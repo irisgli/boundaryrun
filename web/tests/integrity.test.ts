@@ -82,3 +82,56 @@ describe("integrity checks", () => {
     expect(checks.filter((x) => x.ok === false)).toEqual([]);
   });
 });
+
+describe("approval binding (must agree with boundaryrun.approval.check_approval)", () => {
+  const approvalFor = (digest: string) =>
+    Buffer.from(
+      JSON.stringify({
+        investigation_id: "inv-20260101T000000Z-abcdef",
+        report_sha256: digest,
+        verdict: "needs_review",
+        decision: "approve",
+        reviewer: "ada",
+        note: "",
+        recorded_at: "2026-11-05T00:00:00+00:00",
+        hmac: null,
+      }),
+    );
+
+  it("binds when the approval carries the sha256 of report.json on disk", async () => {
+    const { checkApproval } = await import("@/lib/integrity");
+    const reportRaw = await fs.readFile(path.join(RUN, "report.json"));
+    const r = checkApproval(reportRaw, approvalFor(sha256(reportRaw)));
+    expect(r.bound).toBe(true);
+    expect(r.problem).toBeNull();
+    expect(r.approval?.reviewer).toBe("ada");
+  });
+
+  it("is orphaned when report.json changes by one byte", async () => {
+    const { checkApproval } = await import("@/lib/integrity");
+    const reportRaw = await fs.readFile(path.join(RUN, "report.json"));
+    const edited = Buffer.concat([reportRaw, Buffer.from(" ")]);
+    const r = checkApproval(edited, approvalFor(sha256(reportRaw)));
+    expect(r.bound).toBe(false);
+    expect(r.problem).toMatch(/different report\.json/);
+  });
+
+  it("reports an unreadable or incomplete approval rather than ignoring it", async () => {
+    const { checkApproval } = await import("@/lib/integrity");
+    const reportRaw = await fs.readFile(path.join(RUN, "report.json"));
+    expect(checkApproval(reportRaw, Buffer.from("{nope")).bound).toBe(false);
+    expect(checkApproval(reportRaw, Buffer.from('{"reviewer":"x"}')).problem).toMatch(/lacks/);
+    expect(checkApproval(reportRaw, null)).toEqual({ approval: null, bound: null, problem: null });
+  });
+
+  it("appears in the integrity checks only when approval.json exists", async () => {
+    const { report, audit, patch } = await load();
+    const reportRaw = await fs.readFile(path.join(RUN, "report.json"));
+    const without = integrityChecks(report, { audit, patch, hmac: false, report: reportRaw, approval: null });
+    expect(without.find((c) => c.name === "approval")).toBeUndefined();
+    const withIt = integrityChecks(report, { audit, patch, hmac: false, report: reportRaw, approval: approvalFor(sha256(reportRaw)) });
+    const check = withIt.find((c) => c.name === "approval");
+    expect(check?.ok).toBe(true);
+    expect(check?.detail).toMatch(/approve by ada, bound to this report; unsigned/);
+  });
+});

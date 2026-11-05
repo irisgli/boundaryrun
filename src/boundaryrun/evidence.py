@@ -165,4 +165,12 @@ def verify_run(run_dir: Path) -> Verification:
     else:
         checks.append(Check(name="report HMAC", ok=None, detail=f"not signed (no {KEY_ENV} at run time)"))
 
+    from .approval import check_approval  # local import: approval depends on this module
+
+    ac = check_approval(run_dir)
+    if ac.approval is not None or ac.problem:
+        who = f"{ac.approval.decision} by {ac.approval.reviewer}" if ac.approval else "unreadable"
+        ok = None if ac.bound and ac.signature is None else bool(ac.bound and ac.signature is not False)
+        detail = ac.problem or (f"{who}, bound to this report" + (", signed" if ac.signature else ", unsigned"))
+        checks.append(Check(name="approval", ok=ok, detail=detail))
     return Verification(run_dir=str(run_dir), investigation_id=inv_id, checks=checks)
