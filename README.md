@@ -12,7 +12,10 @@ Phase 2 (four prompt-injection attacks across README, source comment, test outpu
 text; unprotected vs protected vs protected+verified comparison with deterministic simulated
 agents, plus an opt-in live arm), and Phase 3 (offline Semgrep in the sandbox with before/after
 comparison feeding the verdict, findings derived from scanner output, git targets at a pinned
-commit, and a gated branch/PR proposal step). No frontend yet.
+commit, and a gated branch/PR proposal step), and Phase 4 (a read-only evidence viewer in `web/`
+that renders `.runs/` from disk: evaluation aggregates, per-run rows, and the full report for one
+investigation including every tool request with both policy decisions, the diff, probe and test
+results before and after, and the static before/after comparison).
 
 ## Requirements
 
@@ -20,6 +23,7 @@ commit, and a gated branch/PR proposal step). No frontend yet.
 - Docker daemon (tested with colima on macOS; the scratch directory must be inside a folder
   shared with the Docker VM, which is why runs live in `.runs/` under the repo)
 - Anthropic API credentials only for `--live`
+- Node 20+ and [pnpm](https://pnpm.io/) only for the evidence viewer
 
 ## Quick start
 
@@ -67,6 +71,21 @@ Live model run (writes a report regardless of outcome; requires `ANTHROPIC_API_K
 Each investigation writes `.runs/<id>/` with `report.json`, `audit.jsonl`, `patch.diff`, the
 read-only `original/` snapshot and the agent's `workspace/`.
 
+## Evidence viewer
+
+```bash
+cd web && pnpm install && pnpm dev
+```
+
+Opens on http://localhost:3000 and reads `../.runs` at request time (override with
+`BOUNDARYRUN_RUNS_DIR`). Nothing is cached, computed client side, or sampled: every number is a
+field of `summary.json`, `report.json` or `audit.jsonl`. Pages: `/` lists evaluations and
+standalone investigations, `/eval/<id>` shows the aggregate table by view and agent plus one row
+per investigation, `/runs/<id>` shows a full report, `/about` defines the verdicts, arms, agents
+and rates. Route identifiers are validated against the generator's format before any filesystem
+access. `pnpm test`, `pnpm typecheck`, `pnpm lint` and `pnpm build` must all pass; the tests run
+the loader against a copy of a real eval summary and two real reports in `web/tests/fixtures`.
+
 ## Layout
 
 ```
@@ -76,6 +95,7 @@ targets/docvault/     deliberately vulnerable FastAPI app (synthetic data, plant
 scenarios/docvault-idor/   finding.json, scenario.toml (policy + sandbox limits), probe.py, fixtures/*.json, attacks/*
 scenarios/docvault-idor-sast/  same target; the finding is derived from a Semgrep rule's baseline result
 docker/runner.Dockerfile   runtime image for target code, tests and the probe
+web/                  Next.js evidence viewer (src/lib/runs.ts loads .runs; src/app/{eval,runs}/[id] render it)
 docs/ARCHITECTURE.md  trust boundaries, invariants with their tests, verdict semantics, limitations
 docs/EVALUATION.md    Phase 2 arms, simulated agents, attacks, metrics, results
 tests/                unit (no Docker), container boundary, end-to-end; live test is opt-in via BOUNDARYRUN_LIVE=1
