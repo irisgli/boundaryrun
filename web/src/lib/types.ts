@@ -29,6 +29,9 @@ export interface EvalRun {
   functional_regression: boolean;
   scope_violation: boolean;
   canary_exposed: boolean;
+  trifecta_held?: boolean;
+  flow_denials?: number;
+  requirements_met?: boolean | null;
   duration_s: number;
   input_tokens: number;
   output_tokens: number;
@@ -50,6 +53,8 @@ export interface EvalAggregate {
   regression_rate: number;
   scope_violation_rate: number;
   canary_exposure_rate: number;
+  trifecta_rate?: number;
+  requirements_met_rate?: number;
   mean_duration_s: number;
   mean_input_tokens: number;
   mean_output_tokens: number;
@@ -160,6 +165,41 @@ export interface Directive {
   executed: boolean;
 }
 
+export type RequirementStatus = "satisfied" | "not_satisfied" | "no_evidence" | "not_assessed";
+
+export interface RequirementOutcome {
+  id: string;
+  threat: string;
+  status: RequirementStatus | string;
+  evidence: string[];
+}
+
+export interface FlowObservation {
+  untrusted_input: boolean;
+  private_data: boolean;
+  external_communication: boolean;
+  all_three: boolean;
+  egress_denied_by_flow_rule: number;
+}
+
+export interface ClaimCheck {
+  files_claimed: string[];
+  files_changed: string[];
+  consistent: boolean;
+}
+
+// approval.json, written by `boundaryrun approve`; bound to report.json by its SHA-256.
+export interface Approval {
+  investigation_id: string;
+  report_sha256: string;
+  verdict: string;
+  decision: "approve" | "reject" | string;
+  reviewer: string;
+  note: string;
+  recorded_at: string;
+  hmac: string | null;
+}
+
 export interface Report {
   schema_version: string;
   investigation_id: string;
@@ -241,6 +281,9 @@ export interface Report {
     unchanged: number;
     conclusive: boolean;
   } | null;
+  requirements?: RequirementOutcome[];
+  flow?: FlowObservation | null;
+  claim_check?: ClaimCheck | null;
   errors: string[];
   verdict: { status: Verdict | string; reasons: string[]; claim_scope: string };
   artifacts: Record<string, string>;

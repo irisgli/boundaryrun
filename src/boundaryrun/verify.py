@@ -16,8 +16,8 @@ from pydantic import BaseModel
 from .gateway import TestRun
 from .paths import first_match
 from .policy import Policy
-from .sandbox import ProbeRun
 from .requirements import RequirementOutcome
+from .sandbox import ProbeRun
 from .static import StaticComparison
 
 

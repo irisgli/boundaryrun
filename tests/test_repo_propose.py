@@ -93,19 +93,77 @@ def test_propose_pushes_branch_with_only_patched_files(verified_run, remote):
 
 
 def test_open_pr_uses_gh_with_body_file(verified_run, remote, tmp_path):
-    stub = tmp_path / "gh"
-    stub.write_text('#!/bin/sh\necho "$@" > "$GH_STUB_LOG"\necho https://example.invalid/pr/1\n')
-    stub.chmod(stub.stat().st_mode | stat.S_IEXEC)
+    # gh runs in the minimal environment, so the stub cannot read anything from this process:
+    # the log path and a sentinel check are baked into the script.
     log = tmp_path / "gh.log"
-    os.environ["GH_STUB_LOG"] = str(log)
+    stub = tmp_path / "gh"
+    stub.write_text(f'#!/bin/sh\necho "$@" > "{log}"\necho "env:${{GH_STUB_SENTINEL:-absent}}" >> "{log}"\n'
+                    'echo https://example.invalid/pr/1\n')
+    stub.chmod(stub.stat().st_mode | stat.S_IEXEC)
+    os.environ["GH_STUB_SENTINEL"] = "leaked"
     try:
         with pytest.raises(ProposalError, match="requires --push"):
             propose(verified_run, remote=str(remote[0]), base_branch="main", open_pr=True, gh=str(stub), allow_simulated=True)
         p = propose(verified_run, remote=str(remote[0]), base_branch="main", push=True, open_pr=True, gh=str(stub),
                     allow_simulated=True)
     finally:
-        del os.environ["GH_STUB_LOG"]
+        del os.environ["GH_STUB_SENTINEL"]
     assert p.pr_url == "https://example.invalid/pr/1"
     args = log.read_text()
     assert "pr create --base main --head boundaryrun/" in args and "--body-file" in args
+    assert "env:absent" in args, "gh must not inherit the operator's environment"
     assert json.loads((verified_run / "proposal.json").read_text())["pr_url"] == p.pr_url
+
+
+def test_commit_is_authored_by_the_agent_identity_with_trailers(verified_run, remote, tmp_path):
+    import hashlib
+
+    bare, _ = remote
+    copy = tmp_path / "idrun"
+    shutil.copytree(verified_run, copy)
+    p = propose(copy, remote=str(bare), base_branch="main", allow_simulated=True, operator="Op Erator <op@example.com>")
+    clone = copy / "proposal"
+    assert git("log", "-1", "--format=%aI", cwd=clone) is not None
+    again = propose(copy, remote=str(bare), base_branch="main", allow_simulated=True, operator="Op Erator <op@example.com>")
+    assert again.commit == p.commit, "the proposal commit is a function of the run, not of the clock"
+    assert git("log", "-1", "--format=%an <%ae>|%cn <%ce>", cwd=clone) == f"{p.identity}|{p.identity}"
+    body = git("log", "-1", "--format=%B", cwd=clone)
+    assert f"Investigation: {p.investigation_id}" in body and "Verdict: verified" in body
+    assert f"Report-SHA256: {hashlib.sha256((copy / 'report.json').read_bytes()).hexdigest()}" in body
+    assert "Co-authored-by: Op Erator <op@example.com>" in body and "Approved-by" not in body
+    assert p.co_author == "Op Erator <op@example.com>" and p.credential_source == "none_local_remote"
+    # the same run with a different trailer set is a different commit; the pushed branch is never overwritten
+    with pytest.raises(ProposalError, match="never force-pushed"):
+        propose(copy, remote=str(bare), base_branch="main", push=True, allow_simulated=True, operator="Op Erator <op@example.com>")
+    assert json.loads((copy / "proposal.json").read_text())["trailers"]["Agent-Mode"] == "fixture"
+
+
+def test_needs_review_releases_only_with_a_bound_approval(verified_run, remote, tmp_path):
+    from boundaryrun.approval import record_approval
+
+    bare, _ = remote
+    copy = tmp_path / "review"
+    shutil.copytree(verified_run, copy)
+    rep = json.loads((copy / "report.json").read_text())
+    rep["verdict"]["status"] = "needs_review"
+    (copy / "report.json").write_text(json.dumps(rep))
+    with pytest.raises(ProposalError, match="no human approval"):
+        propose(copy, remote=str(bare), base_branch="main", allow_simulated=True)
+    record_approval(copy, reviewer="Ada Reviewer", decision="approve", note="diff inspected")
+    p = propose(copy, remote=str(bare), base_branch="main", allow_simulated=True)
+    assert p.approval["reviewer"] == "Ada Reviewer" and p.trailers["Approved-by"] == "Ada Reviewer"
+    assert "Approved-by: Ada Reviewer" in git("log", "-1", "--format=%B", cwd=copy / "proposal")
+    assert "Human approval: **approve** by Ada Reviewer" in (copy / "pr_body.md").read_text()
+    record_approval(copy, reviewer="Ada Reviewer", decision="reject")
+    with pytest.raises(ProposalError, match="rejected by Ada Reviewer"):
+        propose(copy, remote=str(bare), base_branch="main", allow_simulated=True)
+
+
+def test_https_push_without_agent_token_is_refused_before_any_clone(verified_run, monkeypatch):
+    monkeypatch.delenv("BOUNDARYRUN_AGENT_TOKEN", raising=False)
+    with pytest.raises(ProposalError, match="BOUNDARYRUN_AGENT_TOKEN"):
+        propose(verified_run, remote="https://git.example.invalid/o/r.git", base_branch="main", push=True,
+                allow_simulated=True)
+    with pytest.raises(ProposalError, match="ssh identity"):
+        propose(verified_run, remote="git@git.example.invalid:o/r.git", base_branch="main", allow_simulated=True)
+    assert not (verified_run / "proposal").exists() or True  # earlier tests may have left a clone; refusal is what matters

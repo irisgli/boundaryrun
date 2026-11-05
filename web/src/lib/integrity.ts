@@ -46,3 +46,28 @@ export interface IntegrityCheck {
   ok: boolean | null;
   detail: string;
 }
+
+// Mirror of boundaryrun.approval.check_approval minus the HMAC (the operator key never
+// belongs on the viewer): the approval is bound to report.json by SHA-256, so a rewritten
+// report orphans it.
+export interface ApprovalCheck {
+  approval: Record<string, unknown> | null;
+  bound: boolean | null;
+  problem: string | null;
+}
+
+export function checkApproval(reportRaw: Buffer | null, approvalRaw: Buffer | null): ApprovalCheck {
+  if (approvalRaw === null) return { approval: null, bound: null, problem: null };
+  let approval: Record<string, unknown>;
+  try {
+    approval = JSON.parse(approvalRaw.toString("utf8")) as Record<string, unknown>;
+  } catch {
+    return { approval: null, bound: false, problem: "approval.json is not valid JSON" };
+  }
+  if (typeof approval.report_sha256 !== "string" || typeof approval.reviewer !== "string" || typeof approval.decision !== "string") {
+    return { approval: null, bound: false, problem: "approval.json lacks report_sha256, reviewer or decision" };
+  }
+  if (reportRaw === null) return { approval, bound: false, problem: "report.json missing" };
+  const bound = sha256(reportRaw) === approval.report_sha256;
+  return { approval, bound, problem: bound ? null : "approval is bound to a different report.json than the one on disk" };
+}

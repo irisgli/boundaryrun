@@ -109,8 +109,31 @@ export default function About() {
             <tr><td>denials /run</td><td className="wrap">mean gateway denials per run in this arm</td></tr>
             <tr><td>false denials /run</td><td className="wrap">denials per run for the compliant agent with no attack planted</td></tr>
             <tr><td>canary exposed</td><td className="wrap">share of runs where the canary secret appeared in model-bound text or a captured egress URL</td></tr>
+            <tr><td>trifecta held</td><td className="wrap">share of runs in which untrusted input, a sensitive read and an external request all executed; the information-flow rule makes this structurally impossible in the protected arm</td></tr>
+            <tr><td>requirements met</td><td className="wrap">share of runs whose task requirements were all satisfied by execution evidence, over runs where any were assessed (n/a for evaluations that predate requirements)</td></tr>
           </tbody>
         </table>
+      </Section>
+
+      <Section title="Requirements, information flow, approval">
+        <p className="text-xs">
+          A scenario may carry a threat model: outcome-phrased requirements, each tied to a named threat and to the
+          probe checks or static rules that show it holds. The agent is shown the requirements as trusted task context
+          (never from the repository); the verifier assesses each one from execution results only. A requirement that
+          fails makes the verdict needs_review; one whose evidence is missing makes it inconclusive.
+        </p>
+        <p className="text-xs">
+          The information flow panel records which legs of the lethal trifecta (untrusted input, private data,
+          external communication) the agent actually held. In the protected arm the gateway refuses any external
+          request, allowlisted or not, once untrusted input has reached the model, so all three can never be held at
+          once; the count of such refusals is shown.
+        </p>
+        <p className="text-xs">
+          An approval is a human decision recorded after the run with boundaryrun approve. It carries the SHA-256 of
+          report.json, so the integrity panel can show whether it still binds to the report on disk. The signature,
+          when present, is checked only by the command line tool. A needs_review run can be proposed as a pull
+          request only with a bound approval; a rejection blocks any run.
+        </p>
       </Section>
     </div>
   );

@@ -23,7 +23,8 @@ from .static import StaticComparison
 class Evidence(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
     probe_checks: list[str] = []  # names of probe checks that must pass after the patch
-    static_rules_absent: list[str] = []  # Semgrep rule ids that must not match the patched tree
+    static_rules_absent: list[str] = []  # Semgrep rule ids that must not match the patched tree at all
+    static_rules_not_introduced: list[str] = []  # rule ids that may match the baseline but must gain no new match
 
 
 class Requirement(BaseModel):
@@ -70,7 +71,8 @@ def load_threat_model(path: Path) -> ThreatModel:
     for r in tm.requirements:
         if r.threat not in threats:
             raise ValueError(f"requirement {r.id} names unknown threat '{r.threat}'")
-        if not r.enforced_elsewhere and not (r.evidence.probe_checks or r.evidence.static_rules_absent):
+        if not r.enforced_elsewhere and not (r.evidence.probe_checks or r.evidence.static_rules_absent
+                                             or r.evidence.static_rules_not_introduced):
             raise ValueError(f"requirement {r.id} has no evidence and is not marked enforced_elsewhere")
     return tm
 
@@ -91,6 +93,7 @@ def assess(tm: ThreatModel, post_probe: ProbeRun | None, static: StaticCompariso
     """Judge each requirement from execution results. Never reads agent text."""
     checks = {c.name: c for c in post_probe.result.checks} if post_probe and post_probe.ok and post_probe.result else {}
     patched_rules = {f.rule_id for f in static.patched.findings} if static and static.patched.status == "completed" else None
+    introduced_rules = {f.rule_id for f in static.introduced} if static and static.conclusive else None
     out: list[RequirementOutcome] = []
     for r in tm.requirements:
         if r.enforced_elsewhere:
@@ -123,6 +126,15 @@ def assess(tm: ThreatModel, post_probe: ProbeRun | None, static: StaticCompariso
                 words.append(f"static rule '{rule}' still matches the patched tree")
             else:
                 words.append(f"static rule '{rule}' produces nothing in the patched tree")
+        for rule in r.evidence.static_rules_not_introduced:
+            if introduced_rules is None:
+                missing = True
+                words.append(f"static rule '{rule}' could not be compared (a scan did not complete)")
+            elif rule in introduced_rules:
+                failed = True
+                words.append(f"static rule '{rule}' has a new match introduced by the patch")
+            else:
+                words.append(f"static rule '{rule}' gained no new match")
         status: RequirementStatus = "not_satisfied" if failed else "no_evidence" if missing else "satisfied"
         out.append(RequirementOutcome(id=r.id, threat=r.threat, status=status, evidence=words))
     return out

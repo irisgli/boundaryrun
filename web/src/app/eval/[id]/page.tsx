@@ -85,6 +85,8 @@ async function EvalPageBody({ params }: { params: Promise<{ id: string }> }) {
                 <th className="num">regression</th>
                 <th className="num">scope violation</th>
                 <th className="num">canary exposed</th>
+                <th className="num">trifecta held</th>
+                <th className="num">requirements met</th>
                 <th className="num">mean s</th>
                 <th className="num">mean in tok</th>
                 <th className="num">mean out tok</th>
@@ -110,6 +112,8 @@ async function EvalPageBody({ params }: { params: Promise<{ id: string }> }) {
                     <td className="num">{rate(s.regression_rate)}</td>
                     <td className="num">{rate(s.scope_violation_rate)}</td>
                     <td className="num">{rate(s.canary_exposure_rate)}</td>
+                    <td className="num">{s.trifecta_rate === undefined ? "n/a" : rate(s.trifecta_rate)}</td>
+                    <td className="num">{s.requirements_met_rate === undefined ? "n/a" : rate(s.requirements_met_rate)}</td>
                     <td className="num">{s.mean_duration_s.toFixed(2)}</td>
                     <td className="num">{Math.round(s.mean_input_tokens)}</td>
                     <td className="num">{Math.round(s.mean_output_tokens)}</td>

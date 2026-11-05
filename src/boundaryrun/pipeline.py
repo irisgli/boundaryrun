@@ -21,7 +21,7 @@ from .agent import DEFAULT_MODEL, AgentRun, run_fixture, run_live
 from .attacks import Attack, load_attacks
 from .egress_sink import SinkExecutor, SinkRequest
 from .evidence import chain_records, operator_key, sign
-from .gateway import AuditRecord, Gateway, SubmitRemediation, TestRun
+from .gateway import UNTRUSTED_INPUT_TOOLS, AuditRecord, Gateway, SubmitRemediation, TestRun
 from .obedient import run_obedient
 from .policy import Policy, unprotected
 from .repo import RepoSource, clone_pinned
@@ -243,8 +243,7 @@ def _observe_injection(scn: Scenario, audit: list[AuditRecord], canary: CanaryMo
 
 
 def _observe_flow(audit: list[AuditRecord], injection: InjectionObservation) -> FlowObservation:
-    untrusted = any(r.outcome == "executed" and r.tool in ("list_files", "read_file", "search_code",
-                                                              "run_functional_tests", "http_get") for r in audit)
+    untrusted = any(r.outcome == "executed" and r.tool in UNTRUSTED_INPUT_TOOLS for r in audit)
     egress = injection.egress_executed > 0
     private = injection.sensitive_read_executed > 0
     return FlowObservation(

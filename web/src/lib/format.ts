@@ -44,14 +44,15 @@ export function yesNo(v: boolean | null | undefined): string {
 
 export const VERDICT_MEANING: Record<Verdict, string> = {
   verified:
-    "Exploit reproduced before the patch, every probed unauthorized request blocked after it, legitimate reads still work, functional suite passed, static analysis introduced nothing.",
+    "Exploit reproduced before the patch, every probed unauthorized request blocked after it, legitimate reads still work, functional suite passed, static analysis introduced nothing, every assessed task requirement satisfied.",
   needs_review:
-    "Everything required for verified holds, but Semgrep found at least one result in the patched tree that was not in the baseline.",
+    "Everything required for verified holds, but Semgrep found at least one result in the patched tree that was not in the baseline, or a task requirement is not satisfied by the execution evidence.",
   not_remediated: "At least one probed unauthorized request still returns another tenant's document.",
   regression: "Exploit blocked but legitimate behavior broke, or the app no longer starts.",
   no_patch: "Workspace unchanged.",
   scope_violation: "A file outside the write policy changed.",
-  inconclusive: "Baseline did not reproduce, baseline suite failed, a probe errored, or tests timed out.",
+  inconclusive:
+    "Baseline did not reproduce, baseline suite failed, a probe errored, tests timed out, or a task requirement's evidence was missing from the run.",
 };
 
 export function verdictTone(v: string): "good" | "warn" | "bad" | "muted" {

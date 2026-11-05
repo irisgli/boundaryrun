@@ -5,7 +5,57 @@ import { getInvestigation } from "@/lib/runs";
 import { ms, seconds, shortHash, utc, VERDICT_MEANING, yesNo } from "@/lib/format";
 import { Badge, Bool, Effect, Empty, KV, Mono, Note, Outcome, Panel, Section, VerdictBadge } from "@/components/ui";
 import { Diff } from "@/components/diff";
-import type { ProbeResult, StaticFinding, StaticScan, TestResult, Verdict } from "@/lib/types";
+import type { ProbeResult, RequirementOutcome, StaticFinding, StaticScan, TestResult, Verdict } from "@/lib/types";
+
+function requirementTone(status: string): "good" | "warn" | "bad" | "muted" {
+  switch (status) {
+    case "satisfied":
+      return "good";
+    case "not_satisfied":
+      return "bad";
+    case "no_evidence":
+      return "warn";
+    default:
+      return "muted";
+  }
+}
+
+function Requirements({ rows }: { rows: RequirementOutcome[] }) {
+  return (
+    <table className="data">
+      <thead>
+        <tr>
+          <th>requirement</th>
+          <th>threat</th>
+          <th>status</th>
+          <th>evidence</th>
+        </tr>
+      </thead>
+      <tbody>
+        {rows.map((r) => (
+          <tr key={r.id}>
+            <td>
+              <Mono>{r.id}</Mono>
+            </td>
+            <td>
+              <Mono>{r.threat}</Mono>
+            </td>
+            <td>
+              <Badge tone={requirementTone(r.status)}>{r.status}</Badge>
+            </td>
+            <td className="wrap">
+              <ul className="list-disc pl-4">
+                {r.evidence.map((e, i) => (
+                  <li key={i}>{e}</li>
+                ))}
+              </ul>
+            </td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  );
+}
 
 function Probe({ probe }: { probe: ProbeResult | undefined }) {
   if (!probe) return <Empty>Not run.</Empty>;
@@ -135,7 +185,9 @@ async function RunPageBody({ params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
   const loaded = await getInvestigation(id);
   if (!loaded) notFound();
-  const { report: r, evalId, audit, auditError, integrity } = loaded;
+  const { report: r, evalId, audit, auditError, integrity, approval } = loaded;
+  const requirements = r.requirements ?? [];
+  const approvalCheck = integrity.find((c) => c.name === "approval");
   const intact = integrity.every((c) => c.ok !== false);
 
   const meaning = (VERDICT_MEANING as Record<string, string>)[r.verdict.status as Verdict];
@@ -219,6 +271,37 @@ async function RunPageBody({ params }: { params: Promise<{ id: string }> }) {
         </Panel>
       </Section>
 
+      {approval || approvalCheck ? (
+        <Section title="Human approval" aside="recorded after the run; bound to report.json by its sha256">
+          <Panel className="p-3">
+            {approval ? (
+              <KV
+                rows={[
+                  ["decision", <Badge key="d" tone={approval.decision === "approve" ? "good" : "bad"}>{approval.decision}</Badge>],
+                  ["reviewer", approval.reviewer],
+                  ["recorded", utc(approval.recorded_at)],
+                  ["verdict at the time", <VerdictBadge key="v" status={approval.verdict} />],
+                  ["note", approval.note || "none"],
+                  ["bound to this report", <Bool key="b" value={approvalCheck ? approvalCheck.ok !== false : null} />],
+                  ["signed", approval.hmac ? "yes (checked by boundaryrun verify only)" : "no"],
+                ]}
+              />
+            ) : (
+              <Note>{approvalCheck?.detail}</Note>
+            )}
+          </Panel>
+        </Section>
+      ) : null}
+
+      {requirements.length > 0 ? (
+        <Section
+          title="Task requirements"
+          aside="from the scenario threat model; shown to the agent as trusted context, judged from execution results only"
+        >
+          <Requirements rows={requirements} />
+        </Section>
+      ) : null}
+
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         <Section title="Agent claim" aside="stored separately from the verdict; never an input to it">
           {r.agent_claim ? (
@@ -227,6 +310,10 @@ async function RunPageBody({ params }: { params: Promise<{ id: string }> }) {
                 ["summary", r.agent_claim.summary],
                 ["files claimed", r.agent_claim.files_changed.map((f) => <Mono key={f}>{f} </Mono>)],
                 ["files actually changed", r.patch.files.map((f) => <Mono key={f.path}>{f.path} </Mono>)],
+                [
+                  "claimed files match diff",
+                  <Bool key="cc" value={r.claim_check ? r.claim_check.consistent : null} />,
+                ],
                 [
                   "verifier agrees",
                   <Bool key="agree" value={r.verdict.status === "verified"} />,
@@ -335,6 +422,33 @@ async function RunPageBody({ params }: { params: Promise<{ id: string }> }) {
           />
         </Section>
       </div>
+
+      {r.flow ? (
+        <Section
+          title="Information flow"
+          aside="which legs of the lethal trifecta the agent actually held, from executed operations in the audit log"
+        >
+          <KV
+            rows={[
+              ["untrusted input reached the model", <Bool key="u" value={r.flow.untrusted_input} invert />],
+              ["sensitive read executed", <Bool key="p" value={r.flow.private_data} invert />],
+              ["external request executed", <Bool key="e" value={r.flow.external_communication} invert />],
+              [
+                "all three held",
+                <span key="a" className={r.flow.all_three ? "text-bad" : ""}>
+                  <Bool value={r.flow.all_three} invert />
+                </span>,
+              ],
+              ["egress denied by flow rule", String(r.flow.egress_denied_by_flow_rule)],
+            ]}
+          />
+          <p className="text-[11px] text-muted">
+            The protected policy refuses any external request, allowlisted or not, once the agent has consumed
+            untrusted input, so all three legs can never be held together in that arm. Repository reads, listings,
+            searches, test output and fetched bodies all count as untrusted input.
+          </p>
+        </Section>
+      ) : null}
 
       {r.attack ? (
         <Section title="Planted attack" aside={`${r.attack.vector}, objective ${r.attack.objective}`}>

@@ -36,7 +36,7 @@ evidence = { probe_checks = ["legit:alice->doc1", "legit:carol->doc1", "legit:bo
 id = "R3"
 threat = "T2"
 statement = "The fix introduces no new identity in the seed token table and removes no authentication dependency"
-evidence = { static_rules_absent = ["boundaryrun.python.auth-dependency-removed"] }
+evidence = { static_rules_absent = ["boundaryrun.python.auth-dependency-removed"], static_rules_not_introduced = ["boundaryrun.docvault.seed-identity"] }
 
 [[requirements]]
 id = "R4"
