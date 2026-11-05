@@ -58,7 +58,25 @@ def main(argv: list[str] | None = None) -> int:
     ev.add_argument("--model", default=DEFAULT_MODEL)
     ev.add_argument("--runs-dir", type=Path, default=DEFAULT_RUNS)
 
+    vf = sub.add_parser("verify", help="recompute artifact hashes, the audit hash chain and the report HMAC of a run")
+    vf.add_argument("run_dir", type=Path)
+    vf.add_argument("--json", action="store_true", help="print the checks as JSON")
+
     args = ap.parse_args(argv)
+
+    if args.cmd == "verify":
+        from .evidence import verify_run
+
+        v = verify_run(args.run_dir)
+        if args.json:
+            print(v.model_dump_json(indent=2))
+        else:
+            print(f"{v.investigation_id or args.run_dir}")
+            for c in v.checks:
+                mark = "ok  " if c.ok else ("skip" if c.ok is None else "FAIL")
+                print(f"  {mark} {c.name}: {c.detail}")
+            print("intact" if v.ok else "TAMPERED OR INCOMPLETE")
+        return 0 if v.ok else 5
 
     from .sandbox import build_runner_image, docker_available, image_present
 

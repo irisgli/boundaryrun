@@ -11,7 +11,8 @@ from __future__ import annotations
 import hashlib
 import os
 import re
-import tempfile
+import secrets
+import stat
 import time
 import urllib.request
 from collections.abc import Callable
@@ -102,6 +103,8 @@ class AuditRecord(BaseModel):
     output_sha256: str | None = None
     error: str | None = None
     duration_ms: float
+    prev_hash: str | None = None  # set when the log is written: hash chain, see evidence.py
+    record_hash: str | None = None
 
 
 class ToolOutcome(BaseModel):
@@ -216,6 +219,9 @@ class Gateway:
             d = pol.deny(f"path.{e.code}", e.detail)
             record(d, "rejected")
             return ToolOutcome(status="denied", content=f"REJECTED [{d.rule}]: {d.reason}")
+        except _Denied as e:
+            record(e.decision, "denied")
+            return ToolOutcome(status="denied", content=f"DENIED [{e.decision.rule}]: {e.decision.reason}")
         except _ExecError as e:
             record(e.decision, "error", error=str(e))
             return ToolOutcome(status="error", content=f"ERROR: {e}")
@@ -241,7 +247,7 @@ class Gateway:
         return pol.allow("list.filtered", "listing filtered to readable paths"), body or "(no readable files)"
 
     def _op_read_file(self, req: ReadFile) -> tuple[pol.Decision, str]:
-        rel = canonicalize(self.root, req.path)
+        rel = self._canonical_readable(req.path)
         d = pol.decide_read(self.policy, rel)
         if d.effect == "deny":
             return d, ""
@@ -267,8 +273,11 @@ class Gateway:
         return d, _UNTRUSTED + ("\n".join(hits) if hits else "(no matches)")
 
     def _op_edit_file(self, req: EditFile) -> tuple[pol.Decision, str]:
-        rel = canonicalize(self.root, req.path)
-        rd = pol.decide_read(self.policy, rel)
+        try:
+            rel = self._canonical_readable(req.path)
+            rd = pol.decide_read(self.policy, rel)
+        except _Denied as e:
+            rd = e.decision
         if rd.effect == "deny":
             return pol.deny("write.unreadable", f"edit requires read access: {rd.reason}"), ""
         wd_pre = pol.decide_write(self.policy, self.state, rel, 0)
@@ -282,15 +291,7 @@ class Gateway:
         wd = pol.decide_write(self.policy, self.state, rel, len(updated.encode()))
         if wd.effect == "deny":
             return wd, ""
-        target = self.root / rel
-        fd, tmp = tempfile.mkstemp(dir=target.parent, prefix=".br-edit-")
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as fh:
-                fh.write(updated)
-            os.replace(tmp, target)
-        except BaseException:
-            Path(tmp).unlink(missing_ok=True)
-            raise
+        self._write_atomic(rel, updated.encode("utf-8"), wd)
         self.state.edits += 1
         return wd, f"edited {rel} (1 replacement, {len(updated.encode())} bytes)"
 
@@ -333,10 +334,13 @@ class Gateway:
         assert ref is not None
         try:
             if isinstance(req, ReadFile):
-                return pol.decide_read(ref, canonicalize(self.root, req.path))
+                return pol.decide_read(ref, self._canonical_readable(req.path, ref))
             if isinstance(req, EditFile):
-                rel = canonicalize(self.root, req.path)
-                rd = pol.decide_read(ref, rel)
+                try:
+                    rel = self._canonical_readable(req.path, ref)
+                    rd = pol.decide_read(ref, rel)
+                except _Denied as e:
+                    rd = e.decision
                 if rd.effect == "deny":
                     return pol.deny("write.unreadable", f"edit requires read access: {rd.reason}")
                 return pol.decide_write(ref, self.state, rel, 0)
@@ -344,6 +348,8 @@ class Gateway:
                 canonicalize(self.root, req.directory, allow_dir=True)
         except PathRejected as e:
             return pol.deny(f"path.{e.code}", e.detail)
+        except _Denied as e:
+            return e.decision
         if isinstance(req, HttpGet):
             return pol.decide_network(ref, req.url)
         if isinstance(req, RunFunctionalTests):
@@ -362,15 +368,84 @@ class Gateway:
                     continue
                 yield full.relative_to(self.root).as_posix()
 
+    def _canonical_readable(self, raw: str, policy: pol.Policy | None = None) -> str:
+        """Canonicalize a file path without revealing whether a denied path exists.
+
+        A path that does not exist is first judged by the read policy on its requested
+        spelling. If that spelling is denied, the denial is raised exactly as it would be
+        for an existing file, so "denied" and "denied and absent" are indistinguishable.
+        Only paths the policy would allow report `path.not_found`.
+        """
+        try:
+            return canonicalize(self.root, raw)
+        except PathRejected as e:
+            if e.code != "not_found":
+                raise
+            requested = "/".join(p for p in raw.split("/") if p not in ("", "."))
+            d = pol.decide_read(policy or self.policy, requested)
+            if d.effect == "deny":
+                raise _Denied(d) from None
+            raise
+
+    def _open_dir_chain(self, parts: list[str]) -> int:
+        """Open each directory component relative to the previous one, never following symlinks.
+
+        Returns the fd of the innermost directory. This removes the window between the
+        policy check on a canonical path and the open: a component swapped for a symlink
+        after the check fails at open time instead of being followed.
+        """
+        flags = os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0)
+        fd = os.open(self.root, flags)
+        try:
+            for part in parts:
+                nxt = os.open(part, flags, dir_fd=fd)
+                os.close(fd)
+                fd = nxt
+        except BaseException:
+            os.close(fd)
+            raise
+        return fd
+
     def _read_bytes(self, rel: str, d: pol.Decision) -> bytes:
-        p = self.root / rel
-        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
-        fd = os.open(p, flags)
+        *dirs, name = rel.split("/")
+        try:
+            dfd = self._open_dir_chain(dirs)
+            try:
+                fd = os.open(name, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0), dir_fd=dfd)
+            finally:
+                os.close(dfd)
+        except OSError as e:
+            raise _ExecError(d, f"open refused: {e.strerror}") from None
         with os.fdopen(fd, "rb") as fh:
+            st = os.fstat(fh.fileno())
+            if not stat.S_ISREG(st.st_mode):
+                raise _ExecError(d, "only regular files are accessible")
             data = fh.read(self.policy.read.max_bytes + 1)
         if len(data) > self.policy.read.max_bytes:
             raise _ExecError(d, f"file exceeds read limit of {self.policy.read.max_bytes} bytes")
         return data
+
+    def _write_atomic(self, rel: str, data: bytes, d: pol.Decision) -> None:
+        *dirs, name = rel.split("/")
+        tmp = f".br-edit-{os.getpid()}-{secrets.token_hex(4)}"
+        try:
+            self._write_at(dirs, name, tmp, data)
+        except OSError as e:
+            raise _ExecError(d, f"write refused: {e.strerror}") from None
+
+    def _write_at(self, dirs: list[str], name: str, tmp: str, data: bytes) -> None:
+        dfd = self._open_dir_chain(dirs)
+        try:
+            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o644, dir_fd=dfd)
+            try:
+                with os.fdopen(fd, "wb") as fh:
+                    fh.write(data)
+                os.rename(tmp, name, src_dir_fd=dfd, dst_dir_fd=dfd)
+            except BaseException:
+                os.unlink(tmp, dir_fd=dfd)
+                raise
+        finally:
+            os.close(dfd)
 
     def _echo(self, raw: Any) -> dict[str, Any] | None:
         if not isinstance(raw, dict):
@@ -394,6 +469,14 @@ def real_http_get(url: str) -> tuple[int, str]:
     opener = urllib.request.build_opener(_NoRedirect)
     with opener.open(urllib.request.Request(url, method="GET"), timeout=10) as resp:
         return resp.status, resp.read(65536).decode("utf-8", "replace")
+
+
+class _Denied(Exception):
+    """A policy denial raised from inside an executor (carries the decision)."""
+
+    def __init__(self, decision: pol.Decision) -> None:
+        super().__init__(decision.reason)
+        self.decision = decision
 
 
 class _ExecError(Exception):

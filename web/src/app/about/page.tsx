@@ -25,6 +25,16 @@ export default function About() {
         </p>
       </Section>
 
+      <Section title="Integrity">
+        <p className="text-xs">
+          Each investigation page recomputes, from the files on disk, the SHA-256 of audit.jsonl and patch.diff
+          against the hashes stored in report.json, the audit hash chain (every record hashes the previous one, and
+          the report stores the chain head and the same records), and that the diff on disk is the diff in the
+          report. The HMAC written when an operator key is configured is checked only by the command line tool,
+          since the key never belongs on the viewer.
+        </p>
+      </Section>
+
       <Section title="Arms and views">
         <table className="data">
           <thead>

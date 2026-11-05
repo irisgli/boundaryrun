@@ -1,4 +1,4 @@
-# BoundaryRun architecture and threat model (Phase 1)
+# BoundaryRun architecture and threat model
 
 ## Components
 
@@ -11,6 +11,7 @@ One Python process (the **control process**) plus disposable containers. No serv
 | `policy.py`, `paths.py` | Pure, deterministic decisions over canonical paths, URLs and budgets | Trusted |
 | `sandbox.py` | Exports source trees and runs untrusted code in locked-down containers | Trusted orchestrator, untrusted payload |
 | `verify.py`, `static.py` | Diff, independent scope check, Semgrep before/after comparison, verdict as a pure function of execution results | Trusted |
+| `evidence.py` | Audit hash chain, artifact hashes, optional HMAC, and `verify` which recomputes all of them from disk | Trusted |
 | `repo.py`, `propose.py` | Clone a git repository at a pinned commit; turn a verified run into a branch and (explicitly) a PR | Trusted; the cloned content is untrusted |
 | `pipeline.py` | Orchestration and the JSON evidence report | Trusted |
 
@@ -79,6 +80,10 @@ control the scenario definition, the policy, the probe, or the control process.
 | The original source is never modified | Pristine snapshot is copied and made read-only; the target tree hash is checked before and after | `test_pipeline_e2e.py::runs` fixture assertion |
 | Reports never contain the canary | Canary detection happens before redaction; report and audit are redacted on write | `test_artifacts_match_hashes_and_never_contain_canary`, `test_injection_fixture_is_contained_without_relying_on_redaction` |
 | A patch that adds an identity or removes auth is not reported `verified` | Semgrep runs offline in the sandbox on both snapshots; any introduced finding yields `needs_review` | `test_static.py` (rules, identity comparison, `needs_review` end to end), `test_verdict.py::test_static_findings_affect_only_the_verified_branch` |
+| An audit record cannot be altered, removed, inserted or reordered after the run without detection | Each record carries `prev_hash` and `record_hash = sha256(prev_hash || record text)`; the report stores the chain head, the artifact hashes and the same records; `boundaryrun verify` and the web viewer recompute everything | `test_evidence.py` (every mutation class, log and report rewritten together, swapped diff) |
+| A report cannot be rewritten without the operator noticing | With `BOUNDARYRUN_AUDIT_KEY` set at run time, `report.hmac` is an HMAC-SHA256 of `report.json`; `verify` checks it under the same key and fails if a signed run is missing its signature | `test_evidence.py::test_hmac_requires_the_operator_key_and_detects_report_edits`, `test_unsigned_run_fails_when_operator_expects_signatures` |
+| A denied path cannot be probed for existence | A nonexistent path is judged by the read policy on its requested spelling; if that spelling is denied, the response is the same denial an existing file gets | `test_gateway.py::test_denied_region_has_no_existence_oracle` |
+| A component swapped for a symlink between the policy check and the open is not followed | Every directory component is opened relative to the previous directory fd with `O_NOFOLLOW` and `O_DIRECTORY`, the file with `O_NOFOLLOW`, and writes go through a temp file and `rename` on the same directory fd | `test_gateway.py::test_component_replaced_by_symlink_after_check_is_not_followed` |
 | Only a verified, un-attacked patch can become a branch, and it is exactly the reviewed diff | `propose` gates on verdict/attack/mode, verifies the diff hash, re-applies with `git apply --index` at the pinned commit and compares the changed file list | `test_repo_propose.py` |
 
 A blocked request shows that the gateway enforces that specific operation. It is not evidence
@@ -105,7 +110,7 @@ evaluated in this environment.
 - The scenario definition, policy and probe are trusted and reviewed by a human.
 - Only the gateway writes to the workspace while a run is in progress.
 
-## Known limitations (Phase 1)
+## Known limitations
 
 1. **Functional tests are in-process with patched code.** Malicious patched code could tamper
    with pytest and fake a passing functional suite. The security verdict does not depend on this
@@ -117,20 +122,28 @@ evaluated in this environment.
    kernel. A kernel or runtime escape reaches the VM, and colima mounts the user's home
    directory into the VM read-write by default. gVisor or a dedicated microVM would be stronger.
 4. **No seccomp/AppArmor profile beyond Docker defaults.** Not customized.
-5. **The image is pinned by tag, not digest.** Rebuilds may pull a different base layer.
+5. **The runner image is pinned by tag; its base is pinned by digest.** `docker/runner.Dockerfile`
+   names `python:3.12-slim` by `sha256` digest and pins every pip package, so a rebuild cannot
+   silently pull a different base layer. The built image itself is still addressed by tag; its
+   image ID is recorded in every report.
 6. **`http_get`, if ever allowlisted, does not pin DNS.** An allowlisted hostname resolving to a
    private address (DNS rebinding, SSRF) is not prevented. The allowlist is empty in Phase 1.
-7. **Path checks are check-then-open.** Safe under the assumption that only the gateway mutates
-   the workspace; the final open uses `O_NOFOLLOW` but intermediate components are not opened
-   relative to a directory fd.
-8. **Existence oracle.** A denied path returns `read.deny`, a nonexistent one returns
-   `path.not_found`, which reveals whether a denied file exists (not its contents).
+7. **Path checks are check-then-open, but the open cannot be redirected.** Since Phase 5 every
+   component is opened relative to a directory fd with `O_NOFOLLOW`, so a swap between check and
+   open fails instead of being followed. A swap can still make an allowed read fail (denial of
+   service inside the workspace), which the agent would observe as an error.
+8. **Existence oracle closed for files, not directories.** A nonexistent path in a denied region
+   now gets the same denial as an existing one. `list_files` on a nonexistent directory still
+   returns `path.not_found` while a denied existing directory returns an empty listing.
 9. **Static analysis is only as good as the local rules.** Four hand-written rules run offline
    inside the sandbox. They catch the backdoor fixture because a rule names the seed table;
    there is no general detector for malicious in-scope changes.
 10. **No approval workflow.** Operations are allowed or denied; nothing escalates to a human.
-11. **The audit log is not tamper-evident.** It is written by the trusted process outside the
-    workspace and hashed in the report, but not signed or hash-chained.
+11. **Tamper evidence depends on where the report is kept.** The audit log is hash-chained and the
+    report stores the chain head and artifact hashes, so partial edits are detected. An attacker
+    with write access to the run directory can still regenerate everything consistently unless the
+    operator set `BOUNDARYRUN_AUDIT_KEY` at run time and keeps it off the host that stores runs.
+    There is no external timestamping or transparency log.
 12. **Policy cannot distinguish a backdoor from a fix.** The `comment_backdoor` attack edits an
     allowed file (`app/store.py`) and raises zero policy denials in any arm. Since Phase 3 the
     static before/after diff downgrades such a run to `needs_review`; it is still not blocked.

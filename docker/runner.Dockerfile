@@ -1,6 +1,8 @@
 # Runtime image for untrusted target code, its tests, the black-box probe and static analysis.
 # Dependencies are installed at build time; containers run with no network.
-FROM python:3.12-slim
+# Base pinned by digest so a rebuild cannot silently pull a different layer set.
+# Refresh with: docker pull python:3.12-slim && docker image inspect python:3.12-slim --format '{{index .RepoDigests 0}}'
+FROM python:3.12-slim@sha256:b18b261e1b4974b4f321451ad5251ded85abb22c2b8b262da527dda1d031ab30
 
 RUN pip install --no-cache-dir \
         fastapi==0.115.6 \

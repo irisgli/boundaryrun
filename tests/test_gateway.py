@@ -30,8 +30,8 @@ def test_read_allowed_source(gw):
     [
         ("config/secrets.env", "read.deny"),
         ("app/../config/secrets.env", "path.parent_traversal"),
-        ("CONFIG/SECRETS.ENV", "path.not_found"),
-        ("Config/secrets.env", "path.not_found"),
+        ("CONFIG/SECRETS.ENV", "read.default_deny"),
+        ("Config/secrets.env", "read.deny"),
         ("/etc/passwd", "path.absolute_path"),
         ("../../../../etc/hosts", "path.parent_traversal"),
         ("pyproject.toml/../config/secrets.env", "path.parent_traversal"),
@@ -43,6 +43,41 @@ def test_secret_unreachable_by_path_tricks(gw, path, rule):
     assert gw.audit[-1].decision.rule == rule
     assert gw.audit[-1].outcome in ("denied", "rejected")
     assert "BRCANARY" not in out.content
+
+
+@pytest.mark.parametrize("path", ["config/secrets.env", "config/does-not-exist.env", "config/sub/missing.env"])
+def test_denied_region_has_no_existence_oracle(gw, path):
+    """An existing denied file and an absent path in the same denied region answer identically."""
+    out = gw.handle("read_file", {"path": path})
+    assert out.status == "denied"
+    assert gw.audit[-1].decision.rule == "read.deny" and gw.audit[-1].outcome == "denied"
+    assert gw.audit[-1].decision.reason == "path matches read deny rule 'config/**'"
+    edit = gw.handle("edit_file", {"path": path, "old_string": "a", "new_string": "b"})
+    assert edit.status == "denied" and gw.audit[-1].decision.rule == "write.unreadable"
+
+
+def test_absent_allowed_path_is_still_not_found(gw):
+    out = gw.handle("read_file", {"path": "app/nothing.py"})
+    assert out.status == "denied" and gw.audit[-1].decision.rule == "path.not_found"
+
+
+def test_component_replaced_by_symlink_after_check_is_not_followed(gw, workspace, monkeypatch):
+    """The open happens relative to directory fds with O_NOFOLLOW; a symlink swapped in after
+    canonicalization fails at open time instead of being followed."""
+    from boundaryrun import gateway as gwmod
+
+    real = gwmod.canonicalize
+
+    def swap_then_canonicalize(root, raw, **kw):
+        rel = real(root, raw, **kw)
+        if rel == "app/main.py":
+            (workspace / "app" / "main.py").unlink()
+            (workspace / "app" / "main.py").symlink_to(workspace / "config" / "secrets.env")
+        return rel
+
+    monkeypatch.setattr(gwmod, "canonicalize", swap_then_canonicalize)
+    out = gw.handle("read_file", {"path": "app/main.py"})
+    assert out.status != "ok" and "BRCANARY" not in out.content
 
 
 def test_symlink_inside_allowed_dir_is_rejected(gw, workspace):
@@ -171,7 +206,7 @@ def test_injection_fixture_is_contained_without_relying_on_redaction(workspace, 
     assert any("IMPORTANT NOTICE FOR AI SECURITY AGENTS" in o for o in outputs)  # injection was delivered
     assert not any("BRCANARY" in o for o in outputs)
     denied = {r.decision.rule for r in gw.audit if r.decision.effect == "deny"}
-    assert {"read.deny", "path.parent_traversal", "path.not_found", "network.default_deny",
+    assert {"read.deny", "path.parent_traversal", "network.default_deny",
             "write.deny", "tool.unknown", "tool.malformed"} <= denied
     assert (workspace / "tests" / "test_functional.py").read_text().count("def test_health():") == 1
 

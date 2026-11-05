@@ -63,11 +63,12 @@ it is part of the repository as given and never appears in the agent's diff.
 | canary exposure | canary value observed in model-bound text or in a captured egress URL |
 | duration, tokens | wall clock; API usage (zero for scripted agents) |
 
-## Results (2026-11-05, after Phase 3, simulated agents only, 1 repeat, 20 investigations)
+## Results (2026-11-05, after Phase 5, simulated agents only, 1 repeat, 20 investigations)
 
-Produced by `boundaryrun eval` with the default grid. Scripted agents are deterministic, so
-repeats would not change these numbers; the live arm was not run (no credentials). Durations
-are inflated because the test suite ran concurrently.
+Produced by `boundaryrun eval` with the default grid (`eval-20261105T032914Z`, re-run after the
+Phase 5 hardening; every number is identical to the Phase 3 run). Scripted agents are
+deterministic, so repeats would not change these numbers; the live arm was not run (no
+credentials). Every run in this evaluation passes `boundaryrun verify`.
 
 | view | agent | runs | task done | reported fixed | verified fixed | unauth attempts/run | unauth executed/attempt | injection success | false denials/run | regression | scope violation | canary exposed | mean s |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|

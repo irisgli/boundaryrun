@@ -128,3 +128,23 @@ def test_live_model_investigation(tmp_path):
     assert report.injection.sensitive_read_executed == 0 and report.injection.egress_executed == 0
     assert "BRCANARY" not in path.read_text()
     print(f"\nlive verdict: {report.verdict.status} reasons={report.verdict.reasons}")
+
+
+def test_every_real_run_verifies_and_breaks_when_its_log_is_edited(runs, tmp_path):
+    from boundaryrun.evidence import verify_run
+
+    for name, (report, path) in runs.items():
+        v = verify_run(path.parent)
+        assert v.ok, (name, [c for c in v.checks if c.ok is False])
+        assert report.audit_chain_head == report.tool_requests[-1].record_hash
+    # Rewriting one record of a real log is caught even though the file hash is also updated.
+    _, path = runs["injected"]
+    copy = tmp_path / path.parent.name
+    shutil.copytree(path.parent, copy)
+    log = copy / "audit.jsonl"
+    log.write_text(log.read_text().replace('"outcome":"denied"', '"outcome":"executed"', 1))
+    rep = json.loads((copy / "report.json").read_text())
+    rep["artifacts"]["audit.jsonl"] = hashlib.sha256(log.read_bytes()).hexdigest()
+    (copy / "report.json").write_text(json.dumps(rep))
+    v = verify_run(copy)
+    assert not v.ok and any(c.name == "audit chain" and c.ok is False for c in v.checks)

@@ -135,7 +135,8 @@ async function RunPageBody({ params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
   const loaded = await getInvestigation(id);
   if (!loaded) notFound();
-  const { report: r, evalId, audit, auditError } = loaded;
+  const { report: r, evalId, audit, auditError, integrity } = loaded;
+  const intact = integrity.every((c) => c.ok !== false);
 
   const meaning = (VERDICT_MEANING as Record<string, string>)[r.verdict.status as Verdict];
   const hashesMatch = audit.length === r.tool_requests.length;
@@ -171,6 +172,37 @@ async function RunPageBody({ params }: { params: Promise<{ id: string }> }) {
           measures what the gateway and verifier allowed, not how a model behaves.
         </Note>
       ) : null}
+
+      <Section
+        title="Integrity"
+        aside="artifact hashes and the audit hash chain recomputed from the files on disk at request time"
+      >
+        <Panel className="p-3">
+          <div className="flex items-center gap-2 mb-2">
+            <Badge tone={intact ? "good" : "bad"}>{intact ? "intact" : "tampered or incomplete"}</Badge>
+            {r.audit_chain_head ? (
+              <span className="text-xs text-muted">
+                chain head <Mono>{shortHash(r.audit_chain_head, 16)}</Mono>
+              </span>
+            ) : null}
+          </div>
+          <table className="data">
+            <tbody>
+              {integrity.map((c) => (
+                <tr key={c.name}>
+                  <td>
+                    <Badge tone={c.ok === null ? "muted" : c.ok ? "good" : "bad"}>
+                      {c.ok === null ? "n/a" : c.ok ? "ok" : "fail"}
+                    </Badge>
+                  </td>
+                  <td>{c.name}</td>
+                  <td className="wrap text-muted">{c.detail}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </Panel>
+      </Section>
 
       <Section title="Verdict">
         <Panel className="p-3 space-y-2">

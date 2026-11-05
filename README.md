@@ -15,7 +15,11 @@ comparison feeding the verdict, findings derived from scanner output, git target
 commit, and a gated branch/PR proposal step), and Phase 4 (a read-only evidence viewer in `web/`
 that renders `.runs/` from disk: evaluation aggregates, per-run rows, and the full report for one
 investigation including every tool request with both policy decisions, the diff, probe and test
-results before and after, and the static before/after comparison).
+results before and after, and the static before/after comparison), and Phase 5 (hardening: the
+audit log is a hash chain whose head and artifact hashes the report carries, `boundaryrun verify`
+and the viewer recompute them, reports can be HMAC-signed with an operator key, denied paths have
+no existence oracle, file access is directory-fd relative with `O_NOFOLLOW`, the runner base image
+is pinned by digest, and the viewer binds to localhost with a strict CSP).
 
 ## Requirements
 
@@ -66,10 +70,12 @@ Live model run (writes a report regardless of outcome; requires `ANTHROPIC_API_K
 | `eval [--agents compliant obedient live] [--arms ...] [--repeats N]` | Full grid; writes `.runs/eval-*/summary.{json,md}` |
 | `scan --target DIR` | Run the local Semgrep rules against a directory inside the sandbox |
 | `investigate ... --repo URL --ref REF [--subdir DIR]` | Clone a git repository at a pinned commit as the target |
+| `verify RUN_DIR [--json]` | Recompute artifact hashes, the audit hash chain, the report's embedded records and (with `BOUNDARYRUN_AUDIT_KEY`) the report HMAC. Exit 5 if anything differs. Needs no Docker |
 | `propose RUN_DIR --remote URL [--push] [--open-pr]` | Re-apply a verified patch on a fresh clone, commit to `boundaryrun/<id>`, optionally push and open a PR with `gh`. Never merges |
 
 Each investigation writes `.runs/<id>/` with `report.json`, `audit.jsonl`, `patch.diff`, the
-read-only `original/` snapshot and the agent's `workspace/`.
+read-only `original/` snapshot and the agent's `workspace/`. Set `BOUNDARYRUN_AUDIT_KEY` to also
+write `report.hmac`; keep the key off the machine that stores the runs.
 
 ## Evidence viewer
 
@@ -89,7 +95,7 @@ the loader against a copy of a real eval summary and two real reports in `web/te
 ## Layout
 
 ```
-src/boundaryrun/      control process: agent, gateway, policy, paths, sandbox, static, verify, repo, propose, pipeline, eval, cli
+src/boundaryrun/      control process: agent, gateway, policy, paths, sandbox, static, verify, evidence, repo, propose, pipeline, eval, cli
 rules/                local Semgrep rules (mounted read-only into the scan container)
 targets/docvault/     deliberately vulnerable FastAPI app (synthetic data, planted README injection, canary secret)
 scenarios/docvault-idor/   finding.json, scenario.toml (policy + sandbox limits), probe.py, fixtures/*.json, attacks/*
@@ -106,10 +112,10 @@ tests/                unit (no Docker), container boundary, end-to-end; live tes
 Investigation ID and task configuration (policy, sandbox limits, mode, model), execution
 metadata (versions, image ID), the finding, the agent run (mode, autonomy flag, per-turn token
 usage for live runs, visible text only, never hidden reasoning), the agent's own claim kept
-separate from the verdict, every tool request with its policy decision and outcome, injection
+separate from the verdict, every tool request with its policy decision, outcome and chain hashes, injection
 observations (attempts vs executions, canary hits by channel), baseline and post-patch probe
 and test results, the unified diff with per-file scope flags, errors, and the verdict with its
-reasons and an explicit statement of what `verified` does and does not claim.
+reasons and an explicit statement of what `verified` does and does not claim, and the audit chain head.
 
 Live evaluation (real model, every arm and attack, N repeats; requires credentials):
 

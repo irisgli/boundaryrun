@@ -20,6 +20,7 @@ from . import __version__
 from .agent import DEFAULT_MODEL, AgentRun, run_fixture, run_live
 from .attacks import Attack, load_attacks
 from .egress_sink import SinkExecutor, SinkRequest
+from .evidence import chain_records, operator_key, sign
 from .gateway import AuditRecord, Gateway, SubmitRemediation, TestRun
 from .obedient import run_obedient
 from .policy import Policy, unprotected
@@ -178,6 +179,7 @@ class Report(BaseModel):
     errors: list[str]
     verdict: Verdict
     artifacts: dict[str, str]
+    audit_chain_head: str | None = None  # record_hash of the last audit record (see evidence.py)
 
 
 def _summarize(audit: list[AuditRecord]) -> PolicySummary:
@@ -358,8 +360,12 @@ def run_investigation(
         verdict = verdict.model_copy(update={"reasons": [derive_error, *verdict.reasons]})
 
     artifacts: dict[str, str] = {}
+    # Redact first, then chain: the hash covers exactly the bytes that are persisted.
+    redacted = [json.loads(canary.redact(r.model_dump_json())) for r in gateway.audit]
+    lines, chain_head = chain_records(redacted)
+    audit = [AuditRecord.model_validate(r) for r in redacted]
     audit_path = run_dir / "audit.jsonl"
-    audit_path.write_text("".join(canary.redact(r.model_dump_json()) + "\n" for r in gateway.audit))
+    audit_path.write_text("".join(line + "\n" for line in lines), encoding="utf-8")
     artifacts["audit.jsonl"] = hashlib.sha256(audit_path.read_bytes()).hexdigest()
     if patch and patch.diff:
         diff_path = run_dir / "patch.diff"
@@ -395,10 +401,10 @@ def run_investigation(
         agent=agent_run,
         agent_skipped_reason=skipped,
         agent_claim=gateway.agent_claim,
-        tool_requests=gateway.audit,
-        policy_summary=_summarize(gateway.audit),
-        injection=_observe_injection(scn, gateway.audit, canary),
-        attack=_observe_attack(atk, gateway.audit),
+        tool_requests=audit,
+        policy_summary=_summarize(audit),
+        injection=_observe_injection(scn, audit, canary),
+        attack=_observe_attack(atk, audit),
         egress_sink=sink.requests if sink else [],
         baseline={"probe": _probe_dict(baseline_probe), "functional_tests": baseline_tests.model_dump(),
                   "static_scan": baseline_scan.model_dump()},
@@ -412,8 +418,11 @@ def run_investigation(
         errors=errors,
         verdict=verdict,
         artifacts=artifacts,
+        audit_chain_head=chain_head,
     )
     report_path = run_dir / "report.json"
-    report_path.write_text(canary.redact(report.model_dump_json(indent=2)))
+    report_path.write_bytes(canary.redact(report.model_dump_json(indent=2)).encode("utf-8"))
+    if (key := operator_key()) is not None:
+        (run_dir / "report.hmac").write_text(sign(report_path.read_bytes(), key) + "\n")
     shutil.rmtree(run_dir / "sandbox", ignore_errors=True)
     return report, report_path

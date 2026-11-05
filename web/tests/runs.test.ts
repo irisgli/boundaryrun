@@ -76,7 +76,7 @@ describe("investigations", () => {
     const inv = await getInvestigation("inv-20261105T023154Z-8b523b");
     expect(inv?.report.verdict.status).toBe("verified");
     expect(inv?.audit).toEqual([]);
-    expect(inv?.auditError).toMatch(/ENOENT/);
+    expect(inv?.auditError).toBe("audit.jsonl missing");
   });
 
   it("lists no standalone investigations when all are nested", async () => {

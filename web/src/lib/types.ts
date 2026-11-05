@@ -90,6 +90,8 @@ export interface ToolRequest {
   output_sha256: string | null;
   error: string | null;
   duration_ms: number | null;
+  prev_hash?: string | null;
+  record_hash?: string | null;
 }
 
 export interface ProbeCheck {
@@ -242,6 +244,7 @@ export interface Report {
   errors: string[];
   verdict: { status: Verdict | string; reasons: string[]; claim_scope: string };
   artifacts: Record<string, string>;
+  audit_chain_head?: string | null;
 }
 
 export interface EvalIndexEntry {
