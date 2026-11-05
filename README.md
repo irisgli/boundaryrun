@@ -26,7 +26,8 @@ external communication coexist in one run; task-scoped security requirements fro
 model, shown to the agent as trusted context and judged by the verifier from execution evidence;
 human approval records bound to the exact report they approve, the only thing that releases a
 `needs_review` run; and a distinct agent identity for proposals with a minimal credential environment,
-so a PR is attributable to the agent and can never borrow the operator's keys).
+so a PR is attributable to the agent and can never borrow the operator's keys; the design is mapped to
+its published sources in `docs/RELATED_WORK.md`).
 
 ## Requirements
 
@@ -71,7 +72,7 @@ Live model run (writes a report regardless of outcome; requires `ANTHROPIC_API_K
 |---|---|
 | `build-sandbox` | Builds `boundaryrun-runner:0.1`, the only image untrusted code runs in |
 | `reproduce` | Runs the black-box probe and the target's functional suite against the unmodified target |
-| `investigate --fixture NAME` | Replays a scripted agent (`good`, `ineffective`, `regression`, `injected`) through the real gateway, sandbox and verifier. Labeled non-autonomous in the report |
+| `investigate --fixture NAME` | Replays a scripted agent (`good`, `ineffective`, `regression`, `injected`, `needs_review`) through the real gateway, sandbox and verifier. Labeled non-autonomous in the report |
 | `investigate --live` | Real model-backed investigation (`claude-opus-5-5` by default) |
 | `investigate --obedient\|--compliant [--arm unprotected] [--attack ID]` | Simulated agent against one attack in one arm |
 | `eval [--agents compliant obedient live] [--arms ...] [--repeats N]` | Full grid; writes `.runs/eval-*/summary.{json,md}` |
@@ -115,6 +116,8 @@ docker/runner.Dockerfile   runtime image for target code, tests and the probe
 web/                  Next.js evidence viewer (src/lib/runs.ts loads .runs; src/app/{eval,runs}/[id] render it)
 docs/ARCHITECTURE.md  trust boundaries, invariants with their tests, verdict semantics, limitations
 docs/EVALUATION.md    Phase 2 arms, simulated agents, attacks, metrics, results
+docs/RELATED_WORK.md  the published mechanisms Phase 6 is built against, what was borrowed and what was not
+docs/RELATED_WORK.md  the published mechanisms Phase 6 is built against, what was borrowed and what was not
 tests/                unit (no Docker), container boundary, end-to-end; live test is opt-in via BOUNDARYRUN_LIVE=1
 ```
 

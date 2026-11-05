@@ -167,3 +167,39 @@ def test_https_push_without_agent_token_is_refused_before_any_clone(verified_run
     with pytest.raises(ProposalError, match="ssh identity"):
         propose(verified_run, remote="git@git.example.invalid:o/r.git", base_branch="main", allow_simulated=True)
     assert not (verified_run / "proposal").exists() or True  # earlier tests may have left a clone; refusal is what matters
+
+
+@pytest.fixture(scope="module")
+def needs_review_run(remote, tmp_path_factory):
+    """The good fix plus the comment_backdoor edit, with no attack planted: the new seed identity is
+    caught by the static comparison and by requirement R3, not by policy, and the run needs a human."""
+    bare, _ = remote
+    report, path = run_investigation(SCENARIO, agent_mode="fixture", fixture="needs_review",
+                                     runs_dir=tmp_path_factory.mktemp("runs"), repo=(str(bare), "main", "docvault"))
+    assert report.verdict.status.value == "needs_review", report.verdict.reasons
+    assert report.policy_summary.denied == 0
+    assert [f.rule_id for f in report.static_analysis.introduced] == ["boundaryrun.docvault.seed-identity"]
+    assert {r.id: r.status for r in report.requirements} == {"R1": "satisfied", "R2": "satisfied",
+                                                              "R3": "not_satisfied", "R4": "not_assessed"}
+    assert report.claim_check.consistent and report.claim_check.files_changed == ["app/main.py", "app/store.py"]
+    assert report.flow.untrusted_input and not report.flow.external_communication
+    return path.parent
+
+
+def test_needs_review_fixture_releases_only_with_a_bound_approval(needs_review_run, remote):
+    from boundaryrun.approval import record_approval
+
+    bare, head = remote
+    with pytest.raises(ProposalError, match="no human approval"):
+        propose(needs_review_run, remote=str(bare), base_branch="main", allow_simulated=True)
+    record_approval(needs_review_run, reviewer="Iris", decision="approve", note="break-glass token is a test fixture")
+    p = propose(needs_review_run, remote=str(bare), base_branch="main", push=True, allow_simulated=True)
+    assert p.approval["reviewer"] == "Iris" and p.trailers["Verdict"] == "needs_review"
+    assert sorted(git("diff", "--name-only", f"{head}..{p.commit}", cwd=bare).splitlines()) == \
+        ["docvault/app/main.py", "docvault/app/store.py"]
+    body = (needs_review_run / "pr_body.md").read_text()
+    assert "Verdict: **needs_review**" in body and "Human approval: **approve** by Iris" in body
+    assert "| R1 | T1 | satisfied |" in body and "| R3 | T2 | not_satisfied |" in body
+    record_approval(needs_review_run, reviewer="Iris", decision="reject")
+    with pytest.raises(ProposalError, match="rejected by Iris"):
+        propose(needs_review_run, remote=str(bare), base_branch="main", allow_simulated=True)

@@ -100,14 +100,14 @@ control the scenario definition, the policy, the probe, or the control process.
 | A denied path cannot be probed for existence | A nonexistent path is judged by the read policy on its requested spelling; if that spelling is denied, the response is the same denial an existing file gets | `test_gateway.py::test_denied_region_has_no_existence_oracle` |
 | A component swapped for a symlink between the policy check and the open is not followed | Every directory component is opened relative to the previous directory fd with `O_NOFOLLOW` and `O_DIRECTORY`, the file with `O_NOFOLLOW`, and writes go through a temp file and `rename` on the same directory fd | `test_gateway.py::test_component_replaced_by_symlink_after_check_is_not_followed` |
 | Only a verified, un-attacked patch can become a branch, and it is exactly the reviewed diff | `propose` gates on verdict/attack/mode, verifies the diff hash, re-applies with `git apply --index` at the pinned commit and compares the changed file list | `test_repo_propose.py` |
-| The agent never holds untrusted input and external communication in the same run | `TaskState.untrusted_inputs` counts executed listings, reads, searches, test runs and fetches; `decide_network` denies any host, allowlisted or not, once it is above zero; denied and rejected operations do not count | `test_flow_rule.py` (policy and gateway, both directions, every input tool, reference decision in the unprotected arm) |
+| The agent never holds untrusted input and external communication in the same run | `TaskState.untrusted_inputs` counts executed listings, reads, searches, test runs and fetches; `decide_network` denies any host, allowlisted or not, once it is above zero; denied and rejected operations do not count | `test_flow_rule.py` (policy and gateway, both directions, every input tool, reference decision in the unprotected arm), `test_flow.py` |
 | A task requirement is judged from execution evidence, never from agent text | `requirements.assess` reads probe check outcomes and the patched tree's Semgrep results; a failed check yields `not_satisfied`, a missing one `no_evidence`; the verdict becomes `needs_review` or `inconclusive` accordingly | `test_requirements.py`, `test_pipeline_e2e.py::test_requirements_are_assessed_from_execution_evidence` |
 | A threat model cannot name evidence that does not exist | Loading fails on an unknown threat, a duplicate id, or a requirement with neither probe checks nor rules unless marked `enforced_elsewhere`; the scenario's evidence names are checked against the probe and the rule files | `test_requirements.py` (validation and `test_scenario_requirements_name_real_probe_checks_and_rules`) |
 | The agent's account of its change is checked against the diff | `claim_check` compares the files named in `submit_remediation` with the files in the recomputed diff | `test_pipeline_e2e.py::test_flow_observation_and_claim_check` |
-| A `needs_review` run becomes a branch only with a human approval bound to that exact report; a rejection blocks any run; an approval cannot release a failed verdict | `approval.json` stores the SHA-256 of `report.json`; `propose` and `verify` recompute it; a rewritten report orphans the approval | `test_approval.py`, `test_repo_propose.py::test_needs_review_releases_only_with_a_bound_approval` |
+| A `needs_review` run becomes a branch only with a human approval bound to that exact report; a rejection blocks any run; an approval cannot release a failed verdict | `approval.json` stores the SHA-256 of `report.json`; `propose` and `verify` recompute it; a rewritten report orphans the approval | `test_approval.py`, `test_propose_gates.py`, `test_repo_propose.py` (a rewritten verdict and the `needs_review` fixture, both released only with a bound approval) |
 | A forged approval needs the operator key, not just write access to the run directory | With `BOUNDARYRUN_AUDIT_KEY` set the record is HMAC-signed and an unsigned or altered record is refused | `test_approval.py::test_signed_approval_requires_the_key_and_detects_edits` |
-| A proposal commit is attributable to the agent, not the operator, and carries its provenance | Author and committer are forced to the agent identity even with `GIT_AUTHOR_*` set on the host; trailers `Investigation`, `Verdict`, `Audit-Chain-Head`, `Report-SHA256`, `Agent-Mode`, `Approved-by`, `Co-authored-by` | `test_identity.py`, `test_repo_propose.py::test_commit_is_authored_by_the_agent_identity_with_trailers` |
-| The operator's ambient credentials cannot be used by a proposal | git and gh run with `{GIT_TERMINAL_PROMPT, PATH, HOME}` only (a sentinel API key, `GH_TOKEN`, `SSH_AUTH_SOCK` and `GIT_SSH_COMMAND` set on the host are absent in the child); ssh remotes are refused; an https push without `BOUNDARYRUN_AGENT_TOKEN` is refused before any clone; configured credential helpers are cleared and the token travels in the environment, not on the command line | `test_identity.py`, `test_repo_propose.py::test_https_push_without_agent_token_is_refused_before_any_clone` |
+| A proposal commit is attributable to the agent, not the operator, and carries its provenance | Author and committer are forced to the agent identity even with `GIT_AUTHOR_*` set on the host; trailers `Investigation`, `Verdict`, `Audit-Chain-Head`, `Report-SHA256`, `Agent-Mode`, `Approved-by`, `Co-authored-by` | `test_identity.py`, `test_propose_gates.py::test_commit_is_authored_by_the_agent_identity_with_trailers`, `test_repo_propose.py::test_commit_is_authored_by_the_agent_identity_with_trailers` (also: the same run always yields the same commit, and a changed proposal is refused rather than force-pushed) |
+| The operator's ambient credentials cannot be used by a proposal | git and gh run with `{GIT_TERMINAL_PROMPT, PATH, HOME}` only (a sentinel API key, `GH_TOKEN`, `SSH_AUTH_SOCK` and `GIT_SSH_COMMAND` set on the host are absent in the child); ssh remotes are refused; an https push without `BOUNDARYRUN_AGENT_TOKEN` is refused before any clone; configured credential helpers are cleared and the token travels in the environment, not on the command line | `test_identity.py`, `test_propose_gates.py::test_gh_runs_with_a_minimal_environment`, `test_repo_propose.py::test_https_push_without_agent_token_is_refused_before_any_clone` |
 
 A blocked request shows that the gateway enforces that specific operation. It is not evidence
 that the model resists prompt injection in general. Injections are exercised by **scripted**
@@ -150,7 +150,10 @@ evaluated in this environment.
    silently pull a different base layer. The built image itself is still addressed by tag; its
    image ID is recorded in every report.
 6. **`http_get`, if ever allowlisted, does not pin DNS.** An allowlisted hostname resolving to a
-   private address (DNS rebinding, SSRF) is not prevented. The allowlist is empty in Phase 1.
+   private address (DNS rebinding, SSRF) is not prevented. The allowlist is empty in every
+   shipped scenario, so in practice the flow rule (invariant above) is exercised by tests, not by
+   the evaluation: with an empty allowlist every external request is denied by
+   `network.default_deny` before the flow rule is consulted.
 7. **Path checks are check-then-open, but the open cannot be redirected.** Since Phase 5 every
    component is opened relative to a directory fd with `O_NOFOLLOW`, so a swap between check and
    open fails instead of being followed. A swap can still make an allowed read fail (denial of
@@ -190,6 +193,24 @@ evaluated in this environment.
     limited to named probe checks and the absence of named Semgrep rules. Nothing derives
     requirements from the code or keeps them current as it changes; a requirement whose evidence
     is weak (a probe that special-cases seeded ids) is satisfied by a patch that games the probe.
-17. **Live model behavior is unmeasured.** No live run was performed (no credentials in this
+    What was and was not borrowed from the published threat-modeling work is in `RELATED_WORK.md`.
+17. **The flow rule is coarse.** Any executed listing, read, search, test run or fetch taints
+    the task; there is no notion of a trusted repository file or a trusted host, and no way back.
+    An agent that needs documentation from an allowlisted host must fetch it before reading any
+    code, and the fetched body itself counts as untrusted input, so at most one fetch is ever
+    possible under the default rule. The rule says nothing about exfiltration through the patch
+    itself (code that leaks at runtime), which is the probe's and the static rules' job.
+18. **Live model behavior is unmeasured.** No live run was performed (no credentials in this
     environment). The live path is implemented and type-checked against SDK 2.5.0 but has not
     made a successful API call.
+16. **The flow rule is coarse.** Any executed listing, read, search, test run or fetch taints
+    the task; there is no notion of a trusted repository file or a trusted host, and no way back.
+    An agent that needs documentation from an allowlisted host must fetch it before reading any
+    code. The fetched body itself counts as untrusted input, so at most one fetch is ever possible
+    under the default rule. Nothing in the flow rule prevents exfiltration through the patch
+    itself (code that leaks at runtime), which is the probe's and the static rules' job.
+17. **Requirements are only as good as their evidence.** A requirement is satisfied when its
+    named probe checks pass and its named static rules are silent. A requirement whose evidence
+    does not actually test the statement would be reported satisfied; the threat model file is
+    reviewed by a human like the policy. Requirements are not selected per task by a model and
+    there is no continuous threat model; see RELATED_WORK.md.
