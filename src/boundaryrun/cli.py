@@ -47,6 +47,13 @@ def main(argv: list[str] | None = None) -> int:
     pr.add_argument("--push", action="store_true")
     pr.add_argument("--open-pr", action="store_true", help="open a GitHub PR with gh (requires --push)")
     pr.add_argument("--allow-simulated", action="store_true", help="allow a fixture-generated patch (testing only)")
+    pr.add_argument("--operator", help="human operator recorded as co-author, e.g. 'Name <email>'")
+
+    apv = sub.add_parser("approve", help="record a human approval or rejection bound to a run's report")
+    apv.add_argument("run_dir", type=Path)
+    apv.add_argument("--reviewer", required=True, help="who is making the decision (recorded in the proposal)")
+    apv.add_argument("--reject", action="store_true", help="record a rejection instead of an approval")
+    apv.add_argument("--note", default="")
 
     ev = sub.add_parser("eval", help="compare unprotected, protected and protected+verified arms across attacks")
     ev.add_argument("--scenario", type=Path, default=DEFAULT_SCENARIO)
@@ -63,6 +70,19 @@ def main(argv: list[str] | None = None) -> int:
     vf.add_argument("--json", action="store_true", help="print the checks as JSON")
 
     args = ap.parse_args(argv)
+
+    if args.cmd == "approve":
+        from .approval import ApprovalError, record_approval
+
+        try:
+            a = record_approval(args.run_dir, reviewer=args.reviewer, decision="reject" if args.reject else "approve",
+                                note=args.note)
+        except ApprovalError as e:
+            print(f"error: {e}", file=sys.stderr)
+            return 4
+        print(f"{a.decision} recorded for {a.investigation_id} (verdict {a.verdict}) by {a.reviewer}; "
+              f"bound to report {a.report_sha256[:16]}; {'signed' if a.hmac else 'unsigned (no operator key)'}")
+        return 0
 
     if args.cmd == "verify":
         from .evidence import verify_run
@@ -92,11 +112,12 @@ def main(argv: list[str] | None = None) -> int:
 
         try:
             p = propose(args.run_dir, remote=args.remote, base_branch=args.base, push=args.push,
-                        open_pr=args.open_pr, allow_simulated=args.allow_simulated)
+                        open_pr=args.open_pr, allow_simulated=args.allow_simulated, operator=args.operator)
         except ProposalError as e:
             print(f"error: {e}", file=sys.stderr)
             return 4
         print(f"branch {p.branch} at {p.commit} (base {p.base_commit[:12]}); pushed={p.pushed}; pr={p.pr_url or 'not opened'}")
+        print(f"identity {p.identity}; credentials {p.credential_source}; approval {p.approval or 'none'}")
         print(f"PR body: {p.body_path}")
         return 0
     if not image_present():
@@ -192,6 +213,14 @@ def main(argv: list[str] | None = None) -> int:
         print(f"  static: resolved={[f.rule_id for f in st.resolved]} introduced={[f.rule_id for f in st.introduced]} unchanged={st.unchanged}")
     if report.patch:
         print(f"  patch: {[f.path for f in report.patch.files]}")
+    if report.flow:
+        fl = report.flow
+        print(f"  flow: untrusted_input={fl.untrusted_input} private_data={fl.private_data} "
+              f"external_communication={fl.external_communication} denied_by_flow_rule={fl.egress_denied_by_flow_rule}")
+    if report.requirements:
+        print("  requirements: " + ", ".join(f"{r.id}={r.status}" for r in report.requirements))
+    if report.claim_check and not report.claim_check.consistent:
+        print(f"  claim mismatch: agent claimed {report.claim_check.files_claimed}, diff has {report.claim_check.files_changed}")
     print(f"  verdict: {report.verdict.status.value}")
     for r in report.verdict.reasons:
         print(f"    - {r}")

@@ -17,6 +17,7 @@ from .gateway import TestRun
 from .paths import first_match
 from .policy import Policy
 from .sandbox import ProbeRun
+from .requirements import RequirementOutcome
 from .static import StaticComparison
 
 
@@ -117,6 +118,7 @@ def decide(
     post_probe: ProbeRun | None,
     post_tests: TestRun | None,
     static: StaticComparison | None = None,
+    requirements: list[RequirementOutcome] | None = None,
 ) -> Verdict:
     reproduced, why = baseline_reproduced(baseline_probe)
     if not reproduced:
@@ -162,4 +164,16 @@ def decide(
             reasons.append("static analysis: patch introduced " + str([f"{f.rule_id}@{f.path}:{f.line}" for f in static.introduced]))
             return Verdict(status=Status.NEEDS_REVIEW, reasons=reasons)
         reasons.append("static analysis: no findings introduced")
+    if requirements:
+        unmet = [r.id for r in requirements if r.status == "not_satisfied"]
+        unevidenced = [r.id for r in requirements if r.status == "no_evidence"]
+        if unmet:
+            reasons.append(f"requirements not satisfied by execution evidence: {unmet}")
+            return Verdict(status=Status.NEEDS_REVIEW, reasons=reasons)
+        if unevidenced:
+            reasons.append(f"requirements without evidence in this run: {unevidenced}")
+            return Verdict(status=Status.INCONCLUSIVE, reasons=reasons)
+        met = [r.id for r in requirements if r.status == "satisfied"]
+        if met:
+            reasons.append(f"requirements satisfied: {met}")
     return Verdict(status=Status.VERIFIED, reasons=reasons)

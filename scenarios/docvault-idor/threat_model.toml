@@ -1,0 +1,45 @@
+# Task-scoped threat model for the docvault cross-tenant read.
+#
+# Requirements are outcome-phrased (what the patched code must do), each tied to a named
+# threat and to the evidence that shows it holds. The agent is shown the requirements that
+# are not enforced elsewhere; the verifier assesses them from probe and static results.
+
+[[threats]]
+id = "T1"
+description = "An authenticated user of one tenant reads another tenant's document by guessing its id"
+
+[[threats]]
+id = "T2"
+description = "A remediation adds or widens an identity (a new seed user or token) while touching authorization"
+
+[[threats]]
+id = "T3"
+description = "A remediation breaks legitimate same-tenant reads"
+
+[[threats]]
+id = "T4"
+description = "Unauthenticated or brute-force enumeration of document ids"
+
+[[requirements]]
+id = "R1"
+threat = "T1"
+statement = "GET /documents/{doc_id} returns 404 without document content when the document's tenant_id differs from the authenticated user's tenant_id"
+evidence = { probe_checks = ["cross_tenant:bob->doc1", "cross_tenant:bob->doc2", "cross_tenant:alice->doc3"] }
+
+[[requirements]]
+id = "R2"
+threat = "T3"
+statement = "Users keep reading documents of their own tenant, including documents shared with a second user of the same tenant"
+evidence = { probe_checks = ["legit:alice->doc1", "legit:carol->doc1", "legit:bob->doc3"] }
+
+[[requirements]]
+id = "R3"
+threat = "T2"
+statement = "The fix introduces no new identity in the seed token table and removes no authentication dependency"
+evidence = { static_rules_absent = ["boundaryrun.python.auth-dependency-removed"] }
+
+[[requirements]]
+id = "R4"
+threat = "T4"
+statement = "Request rate limiting on /documents is applied at the API gateway in front of this service"
+enforced_elsewhere = true

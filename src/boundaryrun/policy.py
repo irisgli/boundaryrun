@@ -47,6 +47,17 @@ class BudgetPolicy(_Strict):
     max_model_turns: int = 30
 
 
+class FlowPolicy(_Strict):
+    """Information-flow rule over the three legs of the lethal trifecta.
+
+    An agent that has consumed untrusted input must not also be able to communicate
+    externally, whatever the egress allowlist says. The rule is structural (a function of
+    the task state the gateway owns), not a judgement about what the model will do.
+    """
+
+    egress_after_untrusted_input: Literal["deny", "allow"] = "deny"
+
+
 class Policy(_Strict):
     """A policy; `unprotected()` builds the no-authorization baseline used in evaluation."""
 
@@ -55,6 +66,7 @@ class Policy(_Strict):
     network: NetworkPolicy = NetworkPolicy()
     execution: ExecutionPolicy = ExecutionPolicy()
     budget: BudgetPolicy = BudgetPolicy()
+    flow: FlowPolicy = FlowPolicy()
 
 
 def unprotected(reference: Policy) -> Policy:
@@ -69,6 +81,7 @@ def unprotected(reference: Policy) -> Policy:
         network=NetworkPolicy(allow_hosts=["*"]),
         execution=reference.execution,
         budget=reference.budget,
+        flow=FlowPolicy(egress_after_untrusted_input="allow"),
     )
 
 
@@ -93,6 +106,9 @@ class TaskState(BaseModel):
     edits: int = 0
     test_runs: int = 0
     submitted: bool = False
+    # Trifecta legs the agent has actually held so far (counts of executed operations).
+    untrusted_inputs: int = 0  # repository content, test output or fetched bodies reached model context
+    egress: int = 0  # external requests executed
 
 
 def decide_read(policy: Policy, canonical_path: str) -> Decision:
@@ -115,7 +131,9 @@ def decide_write(policy: Policy, state: TaskState, canonical_path: str, new_size
     return allow("write.allow", "path is writable in the disposable workspace")
 
 
-def decide_network(policy: Policy, url: str) -> Decision:
+def decide_network(policy: Policy, url: str, state: TaskState | None = None) -> Decision:
+    """Allowlist first, then the information-flow rule: a host may be allowlisted and still be
+    unreachable once the agent has consumed untrusted input."""
     try:
         parts = urlsplit(url)
     except ValueError:
@@ -130,6 +148,10 @@ def decide_network(policy: Policy, url: str) -> Decision:
         return allow("network.allow_any", "egress allowlist is a wildcard (unprotected configuration)")
     if host not in allowed:
         return deny("network.default_deny", f"host '{host}' is not in the egress allowlist")
+    if state is not None and policy.flow.egress_after_untrusted_input == "deny" and state.untrusted_inputs > 0:
+        return deny("flow.trifecta", f"host '{host}' is allowlisted but the agent has already consumed untrusted "
+                                     f"input ({state.untrusted_inputs} operations); untrusted input and external "
+                                     f"communication are never held together")
     return allow("network.allow", f"host '{host}' is allowlisted")
 
 
