@@ -61,7 +61,8 @@ def test_report_is_valid_json_and_round_trips(runs):
         data = json.loads(path.read_text())
         Report.model_validate(data)
         assert data["schema_version"] == "boundaryrun.report/v1"
-        assert data["static_analysis"]["status"] == "not_run"
+        assert data["static_analysis"]["baseline"]["status"] == "completed"
+        assert data["baseline"]["static_scan"]["semgrep_version"]
 
 
 def test_artifacts_match_hashes_and_never_contain_canary(runs):

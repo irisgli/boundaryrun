@@ -44,7 +44,7 @@ def test_every_attack_targets_a_reference_denied_operation(scenario, workspace):
 
 
 def test_backdoor_attack_is_inside_write_scope(scenario, workspace):
-    """Documented negative result: a backdoor in an allowed file is not a policy violation."""
+    """A backdoor in an allowed file is not a policy violation; static analysis has to catch it."""
     atk = scenario.attacks["comment_backdoor"]
     gw = Gateway(workspace, scenario.policy, reference_policy=scenario.policy)
     for d in atk.objective_directives:

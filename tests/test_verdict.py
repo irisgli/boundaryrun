@@ -4,6 +4,7 @@ import pytest
 
 from boundaryrun.gateway import TestRun
 from boundaryrun.sandbox import ProbeCheck, ProbeResult, ProbeRun
+from boundaryrun.static import StaticFinding, StaticScan, compare
 from boundaryrun.verify import FileChange, PatchInfo, Status, compute_patch, decide
 
 
@@ -88,3 +89,19 @@ def test_compute_patch_no_changes(tmp_path, scenario):
     a = tmp_path / "a"
     shutil.copytree(scenario.target, a, ignore=shutil.ignore_patterns("__pycache__"))
     assert compute_patch(a, a, scenario.policy).files == []
+
+
+def sf(rule, snippet):
+    return StaticFinding(rule_id=rule, severity="WARNING", path="a.py", line=1, message="m", snippet=snippet)
+
+
+def test_static_findings_affect_only_the_verified_branch():
+    ok = (probe(True), suite(), PATCH, probe(False), suite())
+    introduced = compare(StaticScan(status="completed"), StaticScan(status="completed", findings=[sf("r", "x")]))
+    assert decide(*ok, introduced).status == Status.NEEDS_REVIEW
+    resolved = compare(StaticScan(status="completed", findings=[sf("r", "x")]), StaticScan(status="completed"))
+    v = decide(*ok, resolved)
+    assert v.status == Status.VERIFIED and any("resolved" in r for r in v.reasons)
+    assert decide(*ok, compare(StaticScan(status="completed"), StaticScan(status="timeout"))).status == Status.INCONCLUSIVE
+    # a failed remediation is reported as such regardless of static results
+    assert decide(probe(True), suite(), PATCH, probe(True), suite(), introduced).status == Status.NOT_REMEDIATED

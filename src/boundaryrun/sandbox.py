@@ -25,6 +25,7 @@ from pydantic import BaseModel, ConfigDict
 
 from .gateway import TestRun
 from .paths import first_match
+from .static import RULES_DIR, StaticScan, parse_semgrep_json
 
 RUNNER_IMAGE = "boundaryrun-runner:0.1"
 _DOCKERFILE = Path(__file__).resolve().parents[2] / "docker" / "runner.Dockerfile"
@@ -38,6 +39,7 @@ class SandboxConfig(BaseModel):
     pids: int = 128
     test_timeout_s: int = 90
     probe_timeout_s: int = 45
+    scan_timeout_s: int = 120
 
 
 class SandboxError(RuntimeError):
@@ -161,6 +163,36 @@ class Sandbox:
         else:
             status = "error"
         return TestRun(exit_code=code, status=status, duration_s=round(dur, 2), output_tail=combined[-3000:], **counts)
+
+    def run_static_scan(self, src: Path, rules_dir: Path = RULES_DIR) -> StaticScan:
+        """Run Semgrep with local rules only, offline, as an unprivileged user."""
+        import hashlib
+
+        export, _ = self.export(src, "scan")
+        rules = self.scratch / f"rules-{uuid.uuid4().hex[:8]}"
+        export_tree(rules_dir, rules, [], sentinel=True)
+        digest = hashlib.sha256(b"".join(p.read_bytes() for p in sorted(rules.glob("*.yaml")))).hexdigest()
+        name = f"br-scan-{uuid.uuid4().hex[:10]}"
+        args = ["docker", "run", *self._base_flags(name), "--network", "none",
+                "-v", f"{export}:/work:ro", "-v", f"{rules}:/rules:ro", "-w", "/work", RUNNER_IMAGE,
+                *_guarded("/rules", ["semgrep", "scan", "--config", "/rules", "--json", "--metrics=off",
+                                     "--disable-version-check", "--no-git-ignore", "--quiet", "/work"])]  # fmt: skip
+        code, out, err, dur, timed_out = self._run(args, name, self.cfg.scan_timeout_s)
+        shutil.rmtree(rules, ignore_errors=True)
+        try:
+            if timed_out:
+                return StaticScan(status="timeout", rules_sha256=digest, duration_s=round(dur, 2))
+            if code == _MOUNT_FAIL:
+                return StaticScan(status="error", rules_sha256=digest, error="rules mount not visible", duration_s=round(dur, 2))
+            try:
+                findings, errors, version = parse_semgrep_json(out, export)
+            except (ValueError, KeyError) as e:
+                return StaticScan(status="error", rules_sha256=digest, duration_s=round(dur, 2),
+                                  error=f"unparseable semgrep output ({type(e).__name__}); exit={code} {err[-300:]}")
+            return StaticScan(status="completed", semgrep_version=version, rules_sha256=digest, findings=findings,
+                              parse_errors=errors, duration_s=round(dur, 2))
+        finally:
+            shutil.rmtree(export, ignore_errors=True)
 
     def run_probe(self, src: Path, probe: Path) -> ProbeRun:
         """Start the app in one container and run the black-box probe in another.

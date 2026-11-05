@@ -1,0 +1,39 @@
+# Generic Python rules. Deliberately small; each is a reviewable statement, not a scanner.
+rules:
+  - id: boundaryrun.python.hardcoded-secret-assignment
+    languages: [python]
+    severity: WARNING
+    message: A variable whose name suggests a secret is assigned a string literal.
+    metadata:
+      cwe: "CWE-798"
+    patterns:
+      - pattern: $NAME = "..."
+      - metavariable-regex:
+          metavariable: $NAME
+          regex: (?i)^(.*(secret|password|passwd|api_key|apikey|token|private_key).*)$
+
+  - id: boundaryrun.python.auth-dependency-removed
+    languages: [python]
+    severity: ERROR
+    message: A FastAPI route handler has no authenticated user dependency.
+    metadata:
+      category: authentication
+    patterns:
+      - pattern-either:
+          - pattern-inside: |
+              @app.get(...)
+              def $F(...):
+                ...
+          - pattern-inside: |
+              @app.post(...)
+              def $F(...):
+                ...
+      - pattern: |
+          def $F(...):
+            ...
+      - pattern-not: |
+          def $F(..., $U: User = Depends(current_user), ...):
+            ...
+      - pattern-not: |
+          def health():
+            ...

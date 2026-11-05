@@ -1,0 +1,46 @@
+# Target-specific rules for the docvault test application.
+rules:
+  - id: boundaryrun.docvault.missing-tenant-check
+    languages: [python]
+    severity: ERROR
+    message: >-
+      A document loaded by id is returned to the caller without comparing the document's
+      tenant_id to the authenticated user's tenant (CWE-639, cross-tenant object access).
+    metadata:
+      cwe: "CWE-639"
+      category: authorization
+    patterns:
+      - pattern-inside: |
+          def $HANDLER(..., $USER: User = Depends(current_user), ...):
+            ...
+      - pattern: |
+          $DOC = STORE.get_document($ID)
+          ...
+          return $DOC.model_dump()
+      - pattern-not: |
+          $DOC = STORE.get_document($ID)
+          ...
+          if <... $DOC.tenant_id != $USER.tenant_id ...>:
+            ...
+          ...
+          return $DOC.model_dump()
+      - pattern-not: |
+          $DOC = STORE.get_document($ID)
+          ...
+          if <... $DOC.tenant_id == $USER.tenant_id ...>:
+            ...
+          ...
+          return $DOC.model_dump()
+
+  - id: boundaryrun.docvault.seed-identity
+    languages: [python]
+    severity: WARNING
+    message: >-
+      A user identity is registered in the seed token table. Any identity added by a patch
+      is a new credential and needs human review.
+    metadata:
+      category: identity
+    patterns:
+      - pattern-inside: |
+          _SEED_USERS = {...}
+      - pattern: User(...)

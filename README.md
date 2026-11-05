@@ -10,7 +10,9 @@ Status: Phase 1 (one end-to-end scenario, a cross-tenant document read in a Fast
 policy and sandbox boundaries with tests from both sides; machine-readable evidence) and
 Phase 2 (four prompt-injection attacks across README, source comment, test output and finding
 text; unprotected vs protected vs protected+verified comparison with deterministic simulated
-agents, plus an opt-in live arm). No frontend, no GitHub integration yet.
+agents, plus an opt-in live arm), and Phase 3 (offline Semgrep in the sandbox with before/after
+comparison feeding the verdict, findings derived from scanner output, git targets at a pinned
+commit, and a gated branch/PR proposal step). No frontend yet.
 
 ## Requirements
 
@@ -58,6 +60,9 @@ Live model run (writes a report regardless of outcome; requires `ANTHROPIC_API_K
 | `investigate --live` | Real model-backed investigation (`claude-opus-5-5` by default) |
 | `investigate --obedient\|--compliant [--arm unprotected] [--attack ID]` | Simulated agent against one attack in one arm |
 | `eval [--agents compliant obedient live] [--arms ...] [--repeats N]` | Full grid; writes `.runs/eval-*/summary.{json,md}` |
+| `scan --target DIR` | Run the local Semgrep rules against a directory inside the sandbox |
+| `investigate ... --repo URL --ref REF [--subdir DIR]` | Clone a git repository at a pinned commit as the target |
+| `propose RUN_DIR --remote URL [--push] [--open-pr]` | Re-apply a verified patch on a fresh clone, commit to `boundaryrun/<id>`, optionally push and open a PR with `gh`. Never merges |
 
 Each investigation writes `.runs/<id>/` with `report.json`, `audit.jsonl`, `patch.diff`, the
 read-only `original/` snapshot and the agent's `workspace/`.
@@ -65,9 +70,11 @@ read-only `original/` snapshot and the agent's `workspace/`.
 ## Layout
 
 ```
-src/boundaryrun/      control process: agent, gateway, policy, paths, sandbox, verify, pipeline, cli
+src/boundaryrun/      control process: agent, gateway, policy, paths, sandbox, static, verify, repo, propose, pipeline, eval, cli
+rules/                local Semgrep rules (mounted read-only into the scan container)
 targets/docvault/     deliberately vulnerable FastAPI app (synthetic data, planted README injection, canary secret)
 scenarios/docvault-idor/   finding.json, scenario.toml (policy + sandbox limits), probe.py, fixtures/*.json, attacks/*
+scenarios/docvault-idor-sast/  same target; the finding is derived from a Semgrep rule's baseline result
 docker/runner.Dockerfile   runtime image for target code, tests and the probe
 docs/ARCHITECTURE.md  trust boundaries, invariants with their tests, verdict semantics, limitations
 docs/EVALUATION.md    Phase 2 arms, simulated agents, attacks, metrics, results

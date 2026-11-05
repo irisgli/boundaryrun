@@ -23,7 +23,9 @@ from .egress_sink import SinkExecutor, SinkRequest
 from .gateway import AuditRecord, Gateway, SubmitRemediation, TestRun
 from .obedient import run_obedient
 from .policy import Policy, unprotected
+from .repo import RepoSource, clone_pinned
 from .sandbox import RUNNER_IMAGE, ProbeRun, Sandbox, SandboxConfig, export_tree
+from .static import StaticComparison, StaticScan, compare
 from .verify import PatchInfo, Verdict, compute_patch, decide
 
 REPORT_SCHEMA_VERSION = "boundaryrun.report/v1"
@@ -32,8 +34,10 @@ REPORT_SCHEMA_VERSION = "boundaryrun.report/v1"
 class Scenario(BaseModel):
     id: str
     root: Path
-    target: Path
+    target: Path | None  # None when the target comes from --repo
+    fixtures_dir: Path
     finding: dict[str, Any]
+    finding_rule: str | None  # derive the finding from this Semgrep rule's baseline result instead
     probe: Path
     injection_files: list[str]
     canary_pattern: str | None
@@ -52,17 +56,20 @@ def load_scenario(path: Path) -> Scenario:
     raw = tomllib.loads(file.read_text())
     base = file.parent
     s = raw["scenario"]
+    attacks_dir = (base / s["attacks"]).resolve() if "attacks" in s else base / "attacks"
     return Scenario(
         id=s["id"],
         root=base,
-        target=(base / s["target"]).resolve(),
-        finding=json.loads((base / s["finding"]).read_text()),
+        target=(base / s["target"]).resolve() if "target" in s else None,
+        fixtures_dir=(base / s.get("fixtures", "fixtures")).resolve(),
+        finding=json.loads((base / s["finding"]).read_text()) if "finding" in s else {},
+        finding_rule=s.get("finding_rule"),
         probe=(base / s["probe"]).resolve(),
         injection_files=s.get("injection_files", []),
         canary_pattern=s.get("canary_pattern"),
         policy=Policy.model_validate(raw["policy"]),
         sandbox=SandboxConfig.model_validate(raw.get("sandbox", {})),
-        attacks=load_attacks(base / "attacks") if (base / "attacks").is_dir() else {},
+        attacks=load_attacks(attacks_dir) if attacks_dir.is_dir() else {},
     )
 
 
@@ -167,7 +174,7 @@ class Report(BaseModel):
     baseline: dict[str, Any]
     patch: PatchInfo | None
     post_patch: dict[str, Any] | None
-    static_analysis: dict[str, Any]
+    static_analysis: StaticComparison | None
     errors: list[str]
     verdict: Verdict
     artifacts: dict[str, str]
@@ -221,6 +228,26 @@ def _observe_attack(attack: Attack | None, audit: list[AuditRecord]) -> AttackOb
                              objective_achieved=all(o.executed for o in outs))
 
 
+def finding_from_scan(scan: StaticScan, rule_id: str, scenario_id: str) -> tuple[dict[str, Any], str | None]:
+    """Build the structured finding from the baseline Semgrep result for `rule_id`."""
+    if scan.status != "completed":
+        return {}, f"finding could not be derived: baseline static scan {scan.status}: {scan.error}"
+    hits = [f for f in scan.findings if f.rule_id == rule_id]
+    if not hits:
+        return {}, f"finding could not be derived: rule {rule_id} produced no baseline result"
+    f = hits[0]
+    return {
+        "id": f"{scenario_id.upper()}-SAST-1",
+        "source": {"tool": "semgrep", "version": scan.semgrep_version, "rule_id": f.rule_id, "rules_sha256": scan.rules_sha256},
+        "title": f.message.split(".")[0],
+        "severity": f.severity.lower(),
+        "cwe": f.cwe,
+        "location": {"path": f.path, "line": f.line, "snippet": f.snippet},
+        "description": f.message,
+        "additional_matches": len(hits) - 1,
+    }, None
+
+
 def _is_sensitive(scn: Scenario, raw_path: str) -> bool:
     """Heuristic classifier for reporting only (enforcement never uses this)."""
     p = raw_path.lower()
@@ -246,6 +273,7 @@ def run_investigation(
     runs_dir: Path,
     arm: Arm = "protected",
     attack: str | None = None,
+    repo: tuple[str, str, str] | None = None,  # (url, ref, subdir) overrides the scenario target
 ) -> tuple[Report, Path]:
     scn = load_scenario(scenario_path)
     atk = scn.attacks[attack] if attack else None
@@ -254,7 +282,14 @@ def run_investigation(
     run_dir = (runs_dir / inv_id).resolve()
     original, workspace = run_dir / "original", run_dir / "workspace"
     run_dir.mkdir(parents=True)
-    export_tree(scn.target, original, ["**/.git/**", "**/__pycache__/**"])
+    repo_source: RepoSource | None = None
+    if repo is not None:
+        target, repo_source = clone_pinned(repo[0], repo[1], run_dir / "source", repo[2])
+    elif scn.target is not None:
+        target = scn.target
+    else:
+        raise ValueError("scenario has no target; pass --repo")
+    export_tree(target, original, ["**/.git/**", "**/__pycache__/**"])
     finding = atk.apply(original, scn.finding) if atk else scn.finding  # the attack is part of the repo as given
     export_tree(original, workspace, [])
     for p in original.rglob("*"):
@@ -266,6 +301,11 @@ def run_investigation(
 
     baseline_probe = sandbox.run_probe(original, scn.probe)
     baseline_tests = sandbox.run_functional_tests(original)
+    baseline_scan = sandbox.run_static_scan(original)
+    if scn.finding_rule:
+        finding, derive_error = finding_from_scan(baseline_scan, scn.finding_rule, scn.id)
+    else:
+        derive_error = None
 
     from .verify import baseline_reproduced
 
@@ -281,14 +321,16 @@ def run_investigation(
     )
     agent_run: AgentRun | None = None
     skipped: str | None = None
-    if not reproduced or baseline_tests.status != "passed":
+    if derive_error:
+        skipped = derive_error
+    elif not reproduced or baseline_tests.status != "passed":
         skipped = why if not reproduced else f"baseline functional suite {baseline_tests.status}"
     elif agent_mode == "fixture":
         if not fixture:
             raise ValueError("fixture mode requires a fixture name")
-        agent_run = run_fixture(gateway, scn.root / "fixtures" / f"{fixture}.json", canary.scan)
+        agent_run = run_fixture(gateway, scn.fixtures_dir / f"{fixture}.json", canary.scan)
     elif agent_mode in ("obedient", "compliant"):
-        script = scn.root / "fixtures" / f"{fixture or 'good'}.json"
+        script = scn.fixtures_dir / f"{fixture or 'good'}.json"
         agent_run = run_obedient(gateway, finding, script, canary.scan, obey=agent_mode == "obedient")
     else:
         agent_run = run_live(gateway, finding, model, scn.policy.budget.max_model_turns, canary.scan)
@@ -298,16 +340,22 @@ def run_investigation(
     patch: PatchInfo | None = None
     post_probe: ProbeRun | None = None
     post_tests: TestRun | None = None
+    static: StaticComparison | None = None
     if agent_run is not None:
         patch = compute_patch(original, workspace, scn.policy)
         if patch.files and all(f.in_write_scope for f in patch.files):
             post_probe = sandbox.run_probe(workspace, scn.probe)
             post_tests = sandbox.run_functional_tests(workspace)
+            static = compare(baseline_scan, sandbox.run_static_scan(workspace))
     for label, pr in (("baseline", baseline_probe), ("post_patch", post_probe)):
         if pr is not None and not pr.ok:
             errors.append(f"{label} probe: {pr.error}")
 
-    verdict = decide(baseline_probe, baseline_tests, patch, post_probe, post_tests)
+    if derive_error:
+        errors.append(derive_error)
+    verdict = decide(baseline_probe, baseline_tests, patch, post_probe, post_tests, static)
+    if derive_error:
+        verdict = verdict.model_copy(update={"reasons": [derive_error, *verdict.reasons]})
 
     artifacts: dict[str, str] = {}
     audit_path = run_dir / "audit.jsonl"
@@ -326,6 +374,8 @@ def run_investigation(
         task={
             "agent_mode": agent_mode,
             "attack": attack,
+            "repo": repo_source.model_dump() if repo_source else None,
+            "target": str(target),
             "fixture": fixture,
             "model": model if agent_mode == "live" else None,
             "policy": scn.policy.model_dump(),
@@ -350,14 +400,15 @@ def run_investigation(
         injection=_observe_injection(scn, gateway.audit, canary),
         attack=_observe_attack(atk, gateway.audit),
         egress_sink=sink.requests if sink else [],
-        baseline={"probe": _probe_dict(baseline_probe), "functional_tests": baseline_tests.model_dump()},
+        baseline={"probe": _probe_dict(baseline_probe), "functional_tests": baseline_tests.model_dump(),
+                  "static_scan": baseline_scan.model_dump()},
         patch=patch,
         post_patch=(
             {"probe": _probe_dict(post_probe), "functional_tests": post_tests.model_dump()}
             if post_probe and post_tests
             else None
         ),
-        static_analysis={"status": "not_run", "reason": "Semgrep integration is scheduled for Phase 3"},
+        static_analysis=static,
         errors=errors,
         verdict=verdict,
         artifacts=artifacts,

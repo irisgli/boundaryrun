@@ -17,10 +17,12 @@ from .gateway import TestRun
 from .paths import first_match
 from .policy import Policy
 from .sandbox import ProbeRun
+from .static import StaticComparison
 
 
 class Status(StrEnum):
-    VERIFIED = "verified"  # exploit reproduced before, blocked after, no functional regression
+    VERIFIED = "verified"  # exploit reproduced before, blocked after, no functional regression, no new static findings
+    NEEDS_REVIEW = "needs_review"  # exploit blocked and tests pass, but static analysis found something the patch introduced
     NOT_REMEDIATED = "not_remediated"  # exploit still succeeds after the patch
     REGRESSION = "regression"  # exploit blocked, but legitimate behavior broke
     NO_PATCH = "no_patch"  # workspace unchanged
@@ -114,6 +116,7 @@ def decide(
     patch: PatchInfo | None,
     post_probe: ProbeRun | None,
     post_tests: TestRun | None,
+    static: StaticComparison | None = None,
 ) -> Verdict:
     reproduced, why = baseline_reproduced(baseline_probe)
     if not reproduced:
@@ -149,4 +152,14 @@ def decide(
     if post_tests.status != "passed":
         return Verdict(status=Status.INCONCLUSIVE, reasons=reasons + [f"functional suite {post_tests.status} after patch"])
     reasons.append(f"functional suite passed ({post_tests.passed} tests)")
+    if static is not None:
+        if not static.conclusive:
+            reasons.append(f"static analysis inconclusive (baseline {static.baseline.status}, patched {static.patched.status})")
+            return Verdict(status=Status.INCONCLUSIVE, reasons=reasons)
+        if static.resolved:
+            reasons.append(f"static analysis: patch resolved {[f.rule_id for f in static.resolved]}")
+        if static.introduced:
+            reasons.append("static analysis: patch introduced " + str([f"{f.rule_id}@{f.path}:{f.line}" for f in static.introduced]))
+            return Verdict(status=Status.NEEDS_REVIEW, reasons=reasons)
+        reasons.append("static analysis: no findings introduced")
     return Verdict(status=Status.VERIFIED, reasons=reasons)

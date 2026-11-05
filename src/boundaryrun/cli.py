@@ -32,6 +32,21 @@ def main(argv: list[str] | None = None) -> int:
     inv.add_argument("--attack", help="attack id from the scenario's attacks/ directory")
     inv.add_argument("--model", default=DEFAULT_MODEL)
     inv.add_argument("--runs-dir", type=Path, default=DEFAULT_RUNS)
+    inv.add_argument("--repo", help="git URL or path to investigate instead of the scenario's target directory")
+    inv.add_argument("--ref", default="main", help="branch, tag or commit for --repo")
+    inv.add_argument("--subdir", default="", help="path inside the repository that is the application root")
+
+    sc = sub.add_parser("scan", help="run the local Semgrep rules against a directory inside the sandbox")
+    sc.add_argument("--target", type=Path, required=True)
+    sc.add_argument("--scenario", type=Path, default=DEFAULT_SCENARIO, help="scenario whose sandbox limits to use")
+
+    pr = sub.add_parser("propose", help="turn a verified investigation into a branch (and optionally a PR)")
+    pr.add_argument("run_dir", type=Path)
+    pr.add_argument("--remote", required=True, help="git remote URL or path to push the branch to")
+    pr.add_argument("--base", default="main", help="base branch for the pull request")
+    pr.add_argument("--push", action="store_true")
+    pr.add_argument("--open-pr", action="store_true", help="open a GitHub PR with gh (requires --push)")
+    pr.add_argument("--allow-simulated", action="store_true", help="allow a fixture-generated patch (testing only)")
 
     ev = sub.add_parser("eval", help="compare unprotected, protected and protected+verified arms across attacks")
     ev.add_argument("--scenario", type=Path, default=DEFAULT_SCENARIO)
@@ -54,9 +69,33 @@ def main(argv: list[str] | None = None) -> int:
     if args.cmd == "build-sandbox":
         build_runner_image()
         return 0
+    if args.cmd == "propose":
+        from .propose import ProposalError, propose
+
+        try:
+            p = propose(args.run_dir, remote=args.remote, base_branch=args.base, push=args.push,
+                        open_pr=args.open_pr, allow_simulated=args.allow_simulated)
+        except ProposalError as e:
+            print(f"error: {e}", file=sys.stderr)
+            return 4
+        print(f"branch {p.branch} at {p.commit} (base {p.base_commit[:12]}); pushed={p.pushed}; pr={p.pr_url or 'not opened'}")
+        print(f"PR body: {p.body_path}")
+        return 0
     if not image_present():
         print("error: runner image missing; run `boundaryrun build-sandbox` first", file=sys.stderr)
         return 2
+
+    if args.cmd == "scan":
+        from .pipeline import load_scenario
+        from .sandbox import Sandbox
+
+        scn = load_scenario(args.scenario)
+        scan = Sandbox(scn.sandbox, DEFAULT_RUNS.resolve() / "scan").run_static_scan(args.target.resolve())
+        print(f"semgrep {scan.semgrep_version}: {scan.status} ({scan.duration_s}s, rules {scan.rules_sha256[:12] if scan.rules_sha256 else '?'})"
+              + (f" error={scan.error}" if scan.error else ""))
+        for f in scan.findings:
+            print(f"  {f.severity:<8} {f.rule_id:<48} {f.path}:{f.line}")
+        return 0 if scan.status == "completed" else 1
 
     if args.cmd == "reproduce":
         from .pipeline import load_scenario
@@ -105,6 +144,7 @@ def main(argv: list[str] | None = None) -> int:
         runs_dir=args.runs_dir,
         arm=args.arm,
         attack=args.attack,
+        repo=(args.repo, args.ref, args.subdir) if args.repo else None,
     )
     a = report.agent
     label = "LIVE model run" if a and a.mode == "live" else f"SIMULATED agent '{a.fixture if a else args.fixture}' (scripted, not autonomous)"
@@ -129,6 +169,9 @@ def main(argv: list[str] | None = None) -> int:
               f"directives={[(d.tool, d.attempted, d.executed) for d in report.attack.directives]}")
     if report.egress_sink:
         print(f"  egress sink captured {len(report.egress_sink)} request(s); canary in any: {any(r.contained_canary for r in report.egress_sink)}")
+    if report.static_analysis:
+        st = report.static_analysis
+        print(f"  static: resolved={[f.rule_id for f in st.resolved]} introduced={[f.rule_id for f in st.introduced]} unchanged={st.unchanged}")
     if report.patch:
         print(f"  patch: {[f.path for f in report.patch.files]}")
     print(f"  verdict: {report.verdict.status.value}")
